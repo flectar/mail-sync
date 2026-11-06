@@ -1058,6 +1058,34 @@ mod tests {
     use super::*;
 
     #[test]
+    fn damaged_secrets_are_refused_without_panicking() {
+        let secrets = Secrets {
+            identity: DeviceIdentity::generate("https://sync.test", [3; 16]).unwrap(),
+            roots: BTreeMap::from([(1, RootKey::from_bytes([1; 32]))]),
+        };
+        let bytes = secrets.to_bytes();
+        let mut state = 0x853c_49e6_748f_ea9bu64;
+        let mut next = move |below: usize| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state % below as u64) as usize
+        };
+        // Fewer rounds than the other decoders: a parse that gets far
+        // expands an X-Wing key, which is slow in debug builds.
+        for _ in 0..2_000 {
+            let mut damaged = bytes.to_vec();
+            if next(2) == 0 {
+                damaged.truncate(next(damaged.len() + 1));
+            } else {
+                let at = next(damaged.len());
+                damaged[at] = next(256) as u8;
+            }
+            let _ = Secrets::from_bytes(&damaged);
+        }
+    }
+
+    #[test]
     fn secrets_round_trip() {
         let secrets = Secrets {
             identity: DeviceIdentity::generate("https://sync.test", [3; 16]).unwrap(),

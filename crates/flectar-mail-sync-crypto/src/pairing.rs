@@ -309,6 +309,49 @@ mod tests {
     }
 
     #[test]
+    fn decoding_damaged_messages_never_panics() {
+        let mut state = 0x2545_f491_4f6c_dd1du64;
+        let mut next = move |below: usize| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state % below as u64) as usize
+        };
+        let invite = Invite {
+            server_url: "https://sync.example.org".into(),
+            group_id: [4; 16],
+            head_index: 7,
+            head_hash: [5; 32],
+        }
+        .encode()
+        .unwrap();
+        let request = JoinRequest {
+            device: device(),
+            binding_signature: [6; 64],
+        }
+        .encode()
+        .unwrap();
+        for _ in 0..20_000 {
+            let mut bytes = if next(2) == 0 {
+                invite.clone()
+            } else {
+                request.clone()
+            };
+            match next(3) {
+                0 => bytes.truncate(next(bytes.len() + 1)),
+                1 => bytes = (0..next(200)).map(|_| next(256) as u8).collect(),
+                _ => {
+                    let at = next(bytes.len());
+                    bytes[at] = next(256) as u8;
+                }
+            }
+            let _ = Invite::decode(&bytes);
+            let _ = JoinRequest::decode(&bytes);
+            let _ = JoinResult::decode(&bytes);
+        }
+    }
+
+    #[test]
     fn approval_words_change_with_any_input() {
         let words = approval_words(&[4; 16], &[5; 32], &device());
         assert_eq!(words, approval_words(&[4; 16], &[5; 32], &device()));

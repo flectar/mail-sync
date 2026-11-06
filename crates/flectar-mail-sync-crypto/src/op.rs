@@ -509,6 +509,55 @@ mod tests {
         assert!(long_url.encode().is_err());
     }
 
+    /// Decoding untrusted bytes returns an error, never panics: random
+    /// bytes, and valid encodings with bytes changed, cut or added.
+    #[test]
+    fn decoding_damaged_input_never_panics() {
+        let mut state = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = move |below: usize| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state % below as u64) as usize
+        };
+        let valid: Vec<Vec<u8>> = [
+            OpKind::Genesis(Genesis {
+                recovery_sign_public_key: [2; 32],
+                recovery_kem_public_key: vec![3; 40],
+                device: device_keys(4),
+                root_commitment: [5; 32],
+            }),
+            OpKind::ResetRecovery(ResetRecovery {
+                authorizer: Authorizer::Recovery,
+                recovery_sign_public_key: [10; 32],
+                recovery_kem_public_key: vec![11; 40],
+                binding_signature: [12; 64],
+            }),
+            OpKind::MoveServer(MoveServer {
+                authorizer: Authorizer::Device([4; 16]),
+                url: "https://sync.example.org".into(),
+            }),
+        ]
+        .into_iter()
+        .map(|kind| header(kind).encode().unwrap())
+        .collect();
+        for _ in 0..20_000 {
+            let mut bytes = valid[next(valid.len())].clone();
+            match next(4) {
+                0 => bytes = (0..next(300)).map(|_| next(256) as u8).collect(),
+                1 => bytes.truncate(next(bytes.len() + 1)),
+                2 => bytes.extend((0..next(8)).map(|_| next(256) as u8)),
+                _ => {
+                    for _ in 0..1 + next(4) {
+                        let at = next(bytes.len());
+                        bytes[at] = next(256) as u8;
+                    }
+                }
+            }
+            let _ = Op::decode(&bytes);
+        }
+    }
+
     #[test]
     fn signatures_and_hashes_cover_every_byte() {
         let key = DeviceSigningKey::from_seed(&[5; 32]);
