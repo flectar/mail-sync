@@ -21,8 +21,12 @@ ENV CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc \
     CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc
 WORKDIR /src
 COPY . .
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/src/target \
+# Multi-platform builds run this step for every architecture at once on the
+# build machine. Cargo's lock lives outside these mounts, so a shared mount
+# lets two builds unpack the same crate at the same moment; `private` gives
+# each concurrent build its own copy instead.
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=private \
+    --mount=type=cache,target=/src/target,sharing=private \
     set -eux; \
     target="$(cat /rust-target)"; \
     cargo build --release --locked -p flectar-mail-sync-server --target "$target"; \
