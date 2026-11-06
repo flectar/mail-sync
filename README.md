@@ -62,7 +62,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 
 ## Licence
 
-Self-hosting is free: for yourself, your family or your organisation. Offering
-the server to others as a paid hosted service needs a commercial licence. Each
-server release becomes Apache-2.0 four years after it is published. See
-[`LICENSE.md`](LICENSE.md).
+Running the server is free for yourself, your family, your community or inside
+your organisation. Running it as a commercial sync service for others needs a
+commercial licence. Each server release becomes Apache-2.0 four years after it
+is published. See [`LICENSE.md`](LICENSE.md).
