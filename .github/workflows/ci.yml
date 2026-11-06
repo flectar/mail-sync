@@ -81,39 +81,3 @@ jobs:
           docker inspect --format '{{.State.Health.Status}}' sync | grep -qx healthy
           curl --fail --silent http://localhost:8080/v1/info
           docker logs sync
-      - name: Check the compose files
-        working-directory: deploy
-        env:
-          SYNC_DOMAIN: sync.example.org
-          LITESTREAM_ACCESS_KEY_ID: ci
-          LITESTREAM_SECRET_ACCESS_KEY: ci
-          LITESTREAM_BUCKET: ci
-        run: |
-          docker compose -f compose.yaml config --quiet
-          docker compose -f compose.yaml -f compose.litestream.yaml config --quiet
-      # Back up to a local volume, lose the database, and restore it.
-      - name: Rehearse a Litestream restore
-        working-directory: deploy
-        env:
-          SYNC_DOMAIN: sync.example.org
-          LITESTREAM_ACCESS_KEY_ID: ci
-          LITESTREAM_SECRET_ACCESS_KEY: ci
-          LITESTREAM_BUCKET: ci
-        run: |
-          set -x
-          docker tag mail-sync-server:ci ghcr.io/flectar/mail-sync-server:latest
-          files="-p backup-test -f compose.yaml -f compose.litestream.yaml -f ci/compose.backup-test.yaml"
-          docker compose $files up -d --wait sync litestream
-          # A new database: the server applied its migrations.
-          docker compose $files logs sync | grep '"migrated":1'
-          sleep 20
-          docker compose $files logs litestream
-          docker run --rm -v backup-test_backups:/backups busybox find /backups -type f | grep .
-          docker compose $files down
-          docker volume rm backup-test_sync-data
-          docker compose $files up -d --wait sync
-          docker compose $files logs restore
-          # The database came back from the backup: nothing left to migrate.
-          docker compose $files logs sync | grep '"migrated":0'
-          docker run --rm -v backup-test_sync-data:/data busybox ls -ln /data
-          docker compose $files down -v

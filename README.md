@@ -1,7 +1,7 @@
 # Flectar Mail Sync
 
 End-to-end encrypted sync of Flectar Mail accounts, settings and devices.
-This repository holds the protocol, client library and self-hostable server.
+This repository holds the protocol, the client library and the server.
 
 The server stores only ciphertext. It never holds a key that could read your
 data, and every device keeps a full copy, so any device can rebuild a lost
@@ -17,8 +17,7 @@ this service carries what has no home there.
 | `flectar-mail-sync-client` | Sessions, chain verification, pairing, and the record sync engine behind a storage trait the app implements | Apache-2.0 |
 | `flectar-mail-sync-server` | The server: Rust, axum, SQLite | BUSL-1.1 |
 
-The protocol is specified in [`docs/SPEC.md`](docs/SPEC.md). To run your own
-server, see [`docs/SELF-HOSTING.md`](docs/SELF-HOSTING.md).
+The protocol is specified in [`docs/SPEC.md`](docs/SPEC.md).
 
 ## Run the server
 

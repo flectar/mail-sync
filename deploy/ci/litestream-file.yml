@@ -1,5 +1,0 @@
-# CI only: replicate to a local volume instead of S3, to rehearse a restore.
-dbs:
-  - path: /data/sync.db
-    replica:
-      url: file:///backups/sync.db
