@@ -91,6 +91,22 @@ pub fn app(state: AppState) -> Router {
         .with_state(state)
 }
 
+/// Serve `listener` until `shutdown` resolves. Event streams are then closed,
+/// since they never end on their own, and in-flight requests finish.
+pub async fn serve(
+    listener: tokio::net::TcpListener,
+    state: AppState,
+    shutdown: impl Future<Output = ()> + Send + 'static,
+) -> std::io::Result<()> {
+    let events = Arc::clone(&state);
+    axum::serve(listener, app(state))
+        .with_graceful_shutdown(async move {
+            shutdown.await;
+            events.events.close_all();
+        })
+        .await
+}
+
 /// Periodic housekeeping: expire sessions and drop old tombstones.
 pub async fn run_maintenance(state: AppState) {
     let mut ticks = tokio::time::interval(Duration::from_secs(60));
@@ -99,6 +115,7 @@ pub async fn run_maintenance(state: AppState) {
         ticks.tick().await;
         let now = now_ms();
         state.sessions.prune(now);
+        state.events.prune();
         if minutes.is_multiple_of(60) {
             let cutoff = now - millis(state.config.tombstone_retention);
             match state.store.purge_tombstones(cutoff).await {

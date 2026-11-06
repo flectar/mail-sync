@@ -1,5 +1,5 @@
 use clap::{Parser, Subcommand};
-use flectar_mail_sync_server::{Config, State, Store, app, run_maintenance};
+use flectar_mail_sync_server::{Config, State, Store, run_maintenance, serve as serve_until};
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::path::PathBuf;
@@ -126,9 +126,7 @@ async fn serve(args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
     tokio::spawn(run_maintenance(state.clone()));
     let listener = tokio::net::TcpListener::bind(args.listen).await?;
     tracing::info!(listen = %args.listen, "serving");
-    axum::serve(listener, app(state))
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
+    serve_until(listener, state, shutdown_signal()).await?;
     tracing::info!("stopped");
     Ok(())
 }

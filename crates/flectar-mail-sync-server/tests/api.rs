@@ -12,7 +12,7 @@ use flectar_mail_sync_crypto::{
     open_record, seal_record, sign_auth, sign_op,
 };
 use flectar_mail_sync_proto::Bytes;
-use flectar_mail_sync_server::{AppState, Config, State, Store, app};
+use flectar_mail_sync_server::{AppState, Config, State, Store, app, serve};
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
 use std::time::Duration;
@@ -626,4 +626,43 @@ async fn event_streams_announce_new_sequence_numbers() {
     )
     .await;
     assert_eq!(next_event().await, "event: seq\ndata: {\"highSeq\":1}\n\n");
+}
+
+#[tokio::test]
+async fn shutdown_finishes_while_event_streams_are_open() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let h = Harness::new();
+    let device = create_group(&h).await;
+    let token = login(&h, &device).await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    let server = tokio::spawn(serve(listener, h.state.clone(), async {
+        let _ = stopped.await;
+    }));
+
+    // A device listening for events, over a real connection.
+    let mut stream = tokio::net::TcpStream::connect(address).await.unwrap();
+    let request = format!(
+        "GET /v1/groups/{}/events HTTP/1.1\r\nHost: sync.test\r\nAuthorization: Bearer {token}\r\n\r\n",
+        device.group()
+    );
+    stream.write_all(request.as_bytes()).await.unwrap();
+    let mut received = Vec::new();
+    let mut buffer = [0u8; 1024];
+    while !String::from_utf8_lossy(&received).contains("event: seq") {
+        let read = tokio::time::timeout(Duration::from_secs(5), stream.read(&mut buffer))
+            .await
+            .expect("the stream opens")
+            .unwrap();
+        assert!(read > 0, "the server closed the stream early");
+        received.extend_from_slice(&buffer[..read]);
+    }
+
+    stop.send(()).unwrap();
+    tokio::time::timeout(Duration::from_secs(5), server)
+        .await
+        .expect("shutdown does not wait for open event streams")
+        .unwrap()
+        .unwrap();
 }
