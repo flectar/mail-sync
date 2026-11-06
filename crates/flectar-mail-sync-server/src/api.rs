@@ -55,11 +55,14 @@ impl FromRequestParts<AppState> for Authed {
     type Rejection = ApiError;
 
     async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, ApiError> {
+        // RFC 6750 §2.1 with RFC 9110 §11.1: the scheme is case-insensitive.
         let token = parts
             .headers
             .get(axum::http::header::AUTHORIZATION)
             .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.strip_prefix("Bearer "))
+            .and_then(|value| value.split_once(' '))
+            .filter(|(scheme, _)| scheme.eq_ignore_ascii_case("bearer"))
+            .map(|(_, token)| token)
             .ok_or(ApiError::Unauthorized)?;
         state
             .sessions
