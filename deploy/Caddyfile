@@ -1,0 +1,6 @@
+# Caddy flushes server-sent events (text/event-stream) immediately and does
+# not hold them back for compression, so no streaming options are needed.
+{$SYNC_DOMAIN} {
+	encode zstd gzip
+	reverse_proxy sync:8080
+}

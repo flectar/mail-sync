@@ -1,0 +1,39 @@
+# Flectar Mail Sync behind Caddy, which obtains and renews HTTPS
+# certificates automatically. Point SYNC_DOMAIN's DNS at this machine, then:
+#
+#   SYNC_DOMAIN=sync.example.org docker compose up -d
+#
+# Devices use https://$SYNC_DOMAIN as their sync server.
+
+services:
+  sync:
+    image: ghcr.io/flectar/mail-sync-server:latest
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    restart: unless-stopped
+    environment:
+      FLECTAR_MAIL_SYNC_PUBLIC_URL: https://${SYNC_DOMAIN:?set SYNC_DOMAIN to the server's domain}
+    volumes:
+      - sync-data:/data
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    depends_on:
+      - sync
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      SYNC_DOMAIN: ${SYNC_DOMAIN:?set SYNC_DOMAIN to the server's domain}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+
+volumes:
+  sync-data:
+  caddy-data:
+  caddy-config:

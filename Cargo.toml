@@ -1,0 +1,58 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/flectar-mail-sync-proto",
+    "crates/flectar-mail-sync-crypto",
+    "crates/flectar-mail-sync-server",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.92"
+repository = "https://github.com/flectar/mail-sync"
+
+[workspace.dependencies]
+flectar-mail-sync-proto = { path = "crates/flectar-mail-sync-proto", version = "0.1.0" }
+flectar-mail-sync-crypto = { path = "crates/flectar-mail-sync-crypto", version = "0.1.0" }
+
+axum = { version = "0.8.9", default-features = false, features = ["http1", "http2", "json", "query", "tokio", "matched-path"] }
+base64 = "0.23"
+bip39 = { version = "3.0", default-features = false, features = ["std"] }
+chacha20poly1305 = "0.11"
+clap = { version = "4.6", features = ["derive", "env"] }
+ed25519-dalek = "3.0"
+getrandom = "0.4"
+hkdf = "0.13"
+hmac = "0.13"
+rusqlite = { version = "0.41", features = ["bundled"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.11"
+thiserror = "2"
+tokio = { version = "1.53", features = ["macros", "rt-multi-thread", "net", "signal", "sync", "time"] }
+tokio-stream = { version = "0.1.19", features = ["sync"] }
+tower-http = { version = "0.7", features = ["limit", "timeout", "trace"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+zeroize = { version = "1.9", features = ["derive"] }
+
+# Test-only
+http-body-util = "0.1"
+tempfile = "3.27"
+tower = { version = "0.5", features = ["util"] }
+hex = "0.4"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_debug_implementations = "warn"
+
+[workspace.lints.clippy]
+dbg_macro = "warn"
+todo = "warn"
+unwrap_used = "warn"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
