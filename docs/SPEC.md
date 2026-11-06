@@ -131,8 +131,22 @@ Each derivation and signature is bound to one purpose by an ASCII label:
 
 ### 4.5 Records
 
-- **Plaintext:** defined by the client application. It should carry a schema
-  number and keep unknown fields when rewriting. The server never sees it.
+- **Plaintext:** UTF-8 JSON that the server never sees:
+
+  ```json
+  {"v": 1, "collection": "pref", "schema": 1,
+   "stamp": {"ms": 1762400000000, "counter": 0, "device": "<device id>"},
+   "body": {}}
+  ```
+
+  - `collection` must match the record's tag (§4.6); readers check it.
+  - `schema` versions the collection's `body`, which the application
+    defines. Applications keep unknown fields when they rewrite a body.
+  - `stamp` is a hybrid logical clock: wall-clock milliseconds that never run
+    backwards on a device and always move past every stamp it has seen, a
+    counter, and the writing device. Stamps compare in that order.
+  - Readers ignore unknown top-level fields, so new ones must be safe to
+    drop.
 - **Padding:** append `0x80`, then zeros up to the next multiple of 256 bytes.
   At least one byte is always added.
 - **Sealing:** `ciphertext = XChaCha20-Poly1305(record key, nonce, padded, aad)`
@@ -567,6 +581,10 @@ header in seconds. Limits are bursts refilled at a steady rate (GCRA):
   1. Append `remove_device`, then `rotate` with a new root key wrapped for
      every remaining device and recovery.
   2. Write new records under the new epoch.
+- **Leave:** a device removes itself. It cannot rotate for the others: a
+  `remove_device` or `reset_recovery` with no `rotate` after it leaves a
+  rotation due, and the next device to sync appends the `rotate`. The
+  chain's compare-and-set lets only one device do so.
 - **If the recovery code may have leaked:** generate a new code, then
   `reset_recovery` and `rotate`.
 - **Read older records:** open the sealed previous roots back from the
@@ -574,26 +592,44 @@ header in seconds. Limits are bursts refilled at a steady rate (GCRA):
 
 ## 8. Client sync algorithm (informative)
 
-A device keeps:
+`flectar-mail-sync-client` implements this section. A device keeps:
+- the whole chain it verified, and its root keys
 - a cursor: the highest `seq` it has applied
-- a mirror: for each record, the last server version, used as the merge base
-- an outbox: local changes not yet committed
+- a seen mark: the highest `seq` it knows the server reached, from reads
+  and from its own commits
+- a mirror: for each record, the last server version and the newest stamp
+  seen, even after a deletion. It is the base of three-way merges.
+- an outbox: local changes not yet committed, each stamped when made
 
 One sync cycle:
 
-1. **Pull:** read `changes` from the cursor until `more` is false. Merge each
-   record into local state: decrypt, then merge three ways against the mirror.
-   Update the mirror and the cursor.
-2. **Push:** commit the outbox with `expectedSeq` taken from the mirror. On a
-   `409`, pull again, merge, and retry with backoff.
-3. **`410 gone`:** read the whole group from `since=0`, then delete local
-   records that are not in it.
-4. **Rollback:** a server `highSeq` below the cursor means the server lost
-   data, for example after a restore. Read from `since=0`, then commit local
-   versions that are newer than the server's, using the server's current
-   `seq` values.
-5. **When:** sync at start and on foreground, about 2 s after a local
-   change, on each `seq` event, and periodically while running.
+1. **Chain:** read operations from the device's last one, which the server
+   must still hold, and verify them (§5.4). A different operation there is a
+   fork, and the device stops. If a rotation is due (§7), rotate.
+2. **Pull:** read `changes` from the cursor until `more` is false.
+   - Decrypt each record and merge it into local state against the mirror.
+   - A version whose stamp is older than the mirror's newest was rolled back
+     by the server. The device refuses it and commits its own version again,
+     on the server's `seq`.
+   - A record that does not decrypt or parse is skipped and reported, so
+     one bad record cannot stop sync.
+3. **Push:** commit the outbox with `expectedSeq` taken from the mirror.
+   - `409 conflict`: pull again, merge, and retry.
+   - `409 stale_epoch`: read the chain, fetch the new root key, seal again.
+4. **`410 gone`:** read the whole group from `since=0`, then forget mirrored
+   records that are not in it. Their deletions expired.
+5. **Rollback:** a server `highSeq` below the seen mark means the server lost
+   data, for example after a restore from backup.
+   - Read the whole group from `since=0`.
+   - Commit again the versions the server lacks or holds older copies of.
+   - Take the server's `highSeq` as the new seen mark.
+6. **Lost chain:** if the server's chain is a prefix of the device's, the
+   device appends the missing operations again, with the wraps each one
+   needs. If the server lost the whole group, so that the device's login
+   fails, the device creates the group again from its genesis. A server can
+   therefore be rebuilt from any device that remains a member.
+7. **When:** sync at start and on foreground, about 2 s after a local
+   change, on each `seq` or `chain` event, and periodically while running.
 
 ## 9. Limits
 
@@ -636,11 +672,14 @@ the ones clients must respect.
   - slip a root key of its own to devices: unwrapped keys must match the
     chain's commitment
 - **Rollback detection:**
-  - A server that rolls a group back is detected through `highSeq` (§8).
-  - A server that rolls one record back is detected through the hybrid
-    logical clock the client keeps inside the record.
-  - A server that rolls the chain back is detected through the head hash each
-    device remembers.
+  - A server that rolls a group back is detected through `highSeq` and the
+    seen mark (§8).
+  - A server that rolls one record back is detected through the record's
+    stamp (§4.5).
+  - A server that rolls the chain back is detected because devices keep the
+    chain they verified, and they append the lost operations again.
+  - A server can withhold a record or a deletion from a device that never saw
+    it; nothing detects that.
 - **Logins:** login signatures are bound to the server URL and to a
   single-use nonce. Session tokens are random and stored only as SHA-256
   hashes.

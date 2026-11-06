@@ -36,6 +36,10 @@ pub struct GroupState {
     pub sealed_previous_roots: BTreeMap<u64, Vec<u8>>,
     /// Set by a `move_server` operation.
     pub server_url: Option<String>,
+    /// A device was removed or recovery was reset since the last rotation,
+    /// so a member should rotate the root key. Any device that sees this
+    /// does; the chain's compare-and-set lets only one succeed.
+    pub rotation_due: bool,
     pub deleted: bool,
 }
 
@@ -88,6 +92,7 @@ impl GroupState {
             root_commitment: genesis.root_commitment,
             sealed_previous_roots: BTreeMap::new(),
             server_url: None,
+            rotation_due: false,
             deleted: false,
         };
         Ok((state, op))
@@ -166,6 +171,7 @@ impl GroupState {
                     return Err(Error::Malformed("the device is not in the group"));
                 }
                 next.removed.insert(remove.device_id);
+                next.rotation_due = true;
             }
             OpKind::Rotate(rotate) => {
                 if rotate.epoch != next.epoch + 1 {
@@ -178,6 +184,7 @@ impl GroupState {
                 next.root_commitment = rotate.root_commitment;
                 next.sealed_previous_roots
                     .insert(rotate.epoch, rotate.sealed_previous_root.clone());
+                next.rotation_due = false;
             }
             OpKind::ResetRecovery(reset) => {
                 SignPublicKey::from_bytes(&reset.recovery_sign_public_key)?.verify(
@@ -190,6 +197,7 @@ impl GroupState {
                 )?;
                 next.recovery_sign_public_key = reset.recovery_sign_public_key;
                 next.recovery_kem_public_key = reset.recovery_kem_public_key.clone();
+                next.rotation_due = true;
             }
             OpKind::MoveServer(moved) => {
                 let url = moved.url.as_str();
@@ -320,6 +328,7 @@ mod tests {
         let kind = add(&chain, Authorizer::Device([10; 16]), &phone, phone_keys);
         chain.push(&laptop, kind).unwrap();
         assert_eq!(chain.state.devices.len(), 2);
+        assert!(!chain.state.rotation_due);
 
         chain
             .push(
@@ -330,6 +339,7 @@ mod tests {
                 }),
             )
             .unwrap();
+        assert!(chain.state.rotation_due, "a removal calls for a new key");
         chain
             .push(
                 &phone,
@@ -341,9 +351,11 @@ mod tests {
                 }),
             )
             .unwrap();
+        assert!(!chain.state.rotation_due);
         let new_recovery = RecoveryCode::from_bytes([4; 32]).signing_key();
         let kind = reset(&chain, Authorizer::Device([20; 16]), &new_recovery);
         chain.push(&phone, kind).unwrap();
+        assert!(chain.state.rotation_due, "so does a new recovery code");
         chain
             .push(
                 &new_recovery,

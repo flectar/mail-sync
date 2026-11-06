@@ -1,0 +1,30 @@
+[package]
+name = "flectar-mail-sync-client"
+description = "Client of Flectar Mail Sync: sessions, membership, pairing and record sync"
+license = "Apache-2.0"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[dependencies]
+flectar-mail-sync-crypto = { workspace = true, features = ["kem"] }
+flectar-mail-sync-proto.workspace = true
+futures-util.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["sync", "time"] }
+tracing.workspace = true
+url.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+# Tests run the real server in-process.
+flectar-mail-sync-server.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net"] }
+
+[lints]
+workspace = true

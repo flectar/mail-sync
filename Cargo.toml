@@ -3,6 +3,7 @@ resolver = "3"
 members = [
     "crates/flectar-mail-sync-proto",
     "crates/flectar-mail-sync-crypto",
+    "crates/flectar-mail-sync-client",
     "crates/flectar-mail-sync-server",
 ]
 
@@ -15,6 +16,7 @@ repository = "https://github.com/flectar/mail-sync"
 [workspace.dependencies]
 flectar-mail-sync-proto = { path = "crates/flectar-mail-sync-proto", version = "0.1.0" }
 flectar-mail-sync-crypto = { path = "crates/flectar-mail-sync-crypto", version = "0.1.0" }
+flectar-mail-sync-server = { path = "crates/flectar-mail-sync-server" }
 
 axum = { version = "0.8.9", default-features = false, features = ["http1", "http2", "json", "query", "tokio", "matched-path"] }
 base64 = "0.23"
@@ -22,11 +24,14 @@ bip39 = { version = "3.0", default-features = false, features = ["std"] }
 chacha20poly1305 = "0.11"
 clap = { version = "4.6", features = ["derive", "env"] }
 ed25519-dalek = "3.0"
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
 getrandom = "0.4"
 hkdf = "0.13"
 hpke = { version = "0.15.1", default-features = false, features = ["alloc", "getrandom", "mlkem", "x25519", "chacha", "hkdfsha2"] }
 hmac = "0.13"
 ipnet = "2.12"
+# The app passes in its own client, with its TLS and trust settings.
+reqwest = { version = "0.13", default-features = false, features = ["json", "stream"] }
 rusqlite = { version = "0.41", features = ["bundled"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1"
@@ -37,6 +42,7 @@ tokio-stream = { version = "0.1.19", features = ["sync"] }
 tower-http = { version = "0.7", features = ["limit", "timeout", "trace"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+url = "2"
 zeroize = { version = "1.9", features = ["derive"] }
 
 # Test-only
