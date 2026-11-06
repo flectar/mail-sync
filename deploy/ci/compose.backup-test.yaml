@@ -1,0 +1,17 @@
+# CI only, on top of compose.yaml and compose.litestream.yaml: back up to a
+# local volume instead of S3, to rehearse a restore.
+services:
+  restore:
+    volumes:
+      - ./ci/litestream-file.yml:/etc/litestream.yml:ro
+      - backups:/backups
+    command:
+      - litestream restore -if-db-not-exists -if-replica-exists /data/sync.db && chown -R 65532:65532 /data /backups
+
+  litestream:
+    volumes:
+      - ./ci/litestream-file.yml:/etc/litestream.yml:ro
+      - backups:/backups
+
+volumes:
+  backups:

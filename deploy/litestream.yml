@@ -1,0 +1,11 @@
+# Litestream configuration for compose.litestream.yaml. Litestream fills in
+# ${...} from the environment, and reads the credentials from
+# LITESTREAM_ACCESS_KEY_ID and LITESTREAM_SECRET_ACCESS_KEY.
+dbs:
+  - path: /data/sync.db
+    replica:
+      type: s3
+      bucket: ${LITESTREAM_BUCKET}
+      path: ${LITESTREAM_PATH}
+      endpoint: ${LITESTREAM_ENDPOINT}
+      region: ${LITESTREAM_REGION}
