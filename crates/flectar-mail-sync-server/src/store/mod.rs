@@ -143,6 +143,13 @@ fn migrate(conn: &mut Connection) -> Result<()> {
         tx.pragma_update(None, "user_version", index)?;
         tx.commit()?;
     }
+    // A new database applies every migration; an existing or restored one
+    // only the new ones.
+    tracing::info!(
+        schema = MIGRATIONS.len(),
+        migrated = MIGRATIONS.len() - applied,
+        "database ready"
+    );
     Ok(())
 }
 
