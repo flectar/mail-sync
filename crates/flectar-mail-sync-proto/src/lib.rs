@@ -216,11 +216,30 @@ pub enum Change<'a> {
     Delete,
 }
 
+/// Why a [`CommitItem`] was refused.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ItemError {
+    /// The item is malformed.
+    Invalid(&'static str),
+    /// The ciphertext is larger than the server's record limit.
+    TooLarge,
+}
+
+impl std::fmt::Display for ItemError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Invalid(message) => f.write_str(message),
+            Self::TooLarge => f.write_str("ciphertext is larger than the record limit"),
+        }
+    }
+}
+
 impl CommitItem {
     /// Check the shape of the item; `max_record_bytes` bounds the ciphertext.
-    pub fn change(&self, max_record_bytes: u64) -> Result<Change<'_>, &'static str> {
+    pub fn change(&self, max_record_bytes: u64) -> Result<Change<'_>, ItemError> {
+        use ItemError::{Invalid, TooLarge};
         if self.record_id.len() != len::RECORD_ID {
-            return Err("recordId must be 16 bytes");
+            return Err(Invalid("recordId must be 16 bytes"));
         }
         if self.deleted {
             if self.tag.is_some()
@@ -228,26 +247,26 @@ impl CommitItem {
                 || self.nonce.is_some()
                 || self.ciphertext.is_some()
             {
-                return Err("a deletion carries no payload");
+                return Err(Invalid("a deletion carries no payload"));
             }
             return Ok(Change::Delete);
         }
         let (Some(tag), Some(epoch), Some(nonce), Some(ciphertext)) =
             (&self.tag, self.epoch, &self.nonce, &self.ciphertext)
         else {
-            return Err("a record needs tag, epoch, nonce and ciphertext");
+            return Err(Invalid("a record needs tag, epoch, nonce and ciphertext"));
         };
         if tag.len() != len::TAG {
-            return Err("tag must be 16 bytes");
+            return Err(Invalid("tag must be 16 bytes"));
         }
         if nonce.len() != len::NONCE {
-            return Err("nonce must be 24 bytes");
+            return Err(Invalid("nonce must be 24 bytes"));
         }
         if ciphertext.is_empty() {
-            return Err("ciphertext is empty");
+            return Err(Invalid("ciphertext is empty"));
         }
         if ciphertext.len() as u64 > max_record_bytes {
-            return Err("ciphertext is larger than the record limit");
+            return Err(TooLarge);
         }
         Ok(Change::Put {
             tag: tag.as_slice(),
@@ -389,7 +408,7 @@ mod tests {
             ..Default::default()
         };
         assert!(matches!(put.change(64), Ok(Change::Put { epoch: 1, .. })));
-        assert!(put.change(39).is_err(), "over the record limit");
+        assert_eq!(put.change(39), Err(ItemError::TooLarge));
 
         let delete = CommitItem {
             record_id: Bytes(vec![1; 16]),

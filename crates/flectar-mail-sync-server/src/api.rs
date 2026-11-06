@@ -14,8 +14,8 @@ use axum::response::{IntoResponse, Response};
 use flectar_mail_sync_crypto::{Op, OpKind, SignPublicKey, op_hash, verify_auth};
 use flectar_mail_sync_proto::{
     Bytes, Challenge, ChallengeRequest, Change, Changes, CommitRequest, CommitResponse, Committed,
-    CreateGroup, GroupCreated, Info, PROTOCOL_VERSION, Record, SeqEvent, Session, SessionRequest,
-    len,
+    CreateGroup, GroupCreated, Info, ItemError, PROTOCOL_VERSION, Record, SeqEvent, Session,
+    SessionRequest, len,
 };
 use serde::Deserialize;
 use std::collections::HashSet;
@@ -212,13 +212,12 @@ pub async fn commit(
     let mut seen = HashSet::with_capacity(request.items.len());
     let mut changes = Vec::with_capacity(request.items.len());
     for item in &request.items {
-        let change = item.change(limits.max_record_bytes).map_err(|message| {
-            if message.contains("larger") {
-                ApiError::PayloadTooLarge(message.into())
-            } else {
-                ApiError::bad_request(message)
-            }
-        })?;
+        let change = item
+            .change(limits.max_record_bytes)
+            .map_err(|error| match error {
+                ItemError::TooLarge => ApiError::PayloadTooLarge(error.to_string()),
+                ItemError::Invalid(message) => ApiError::bad_request(message),
+            })?;
         let record_id = fixed::<{ len::RECORD_ID }>(&item.record_id, "recordId")?;
         if !seen.insert(record_id) {
             return Err(ApiError::bad_request(
