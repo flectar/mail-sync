@@ -27,6 +27,9 @@ ignore = true
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
+# Lets the client's tests use the unpublished server crate by path. Path
+# dependencies of published crates still fail.
+allow-wildcard-paths = true
 
 [sources]
 unknown-registry = "deny"

@@ -21,8 +21,9 @@ url.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
-# Tests run the real server in-process.
-flectar-mail-sync-server.workspace = true
+# Tests run the real server in-process. Path only: the server is never
+# published, and crates.io drops path-only dev-dependencies.
+flectar-mail-sync-server = { path = "../flectar-mail-sync-server" }
 tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net"] }
 
