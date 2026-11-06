@@ -317,12 +317,15 @@ and the app both use it.
 | 403 | `forbidden` | The session belongs to another group, or a recovery session asked for something only devices may do |
 | 404 | `not_found` | Unknown group, or no wrap for this session |
 | 409 | `conflict` | Stale `expectedSeq`, the group id is taken, the recovery key belongs to another group, or the chain moved on |
+| 409 | `stale_epoch` | A record was sealed for another epoch than the current one: read the chain, fetch the root key and seal again |
 | 410 | `gone` | `since` is below the tombstone horizon; read again from 0 |
 | 410 | `group_deleted` | The group was deleted |
 | 413 | `payload_too_large` | Over a size or batch limit |
 | 429 | `rate_limited` | Too many requests |
 | 507 | `quota_exceeded` | The group would exceed its storage quota or device limit |
 | 500 | `internal` | Server failure |
+
+Clients handle codes they do not know by the HTTP status.
 
 ### 6.2 `GET /v1/info`
 
@@ -387,7 +390,8 @@ Rules:
   `409` with every stale record and its `currentSeq`, and nothing is stored.
 - A record id appears at most once per commit.
 - A deletion needs `expectedSeq > 0`.
-- `epoch` must equal the group's current epoch.
+- `epoch` must equal the group's current epoch, else the answer is
+  `409 stale_epoch`. This happens when another device rotated the key.
 - Size, batch and quota limits come from `/v1/info`. A commit that does not
   grow the group is accepted even over quota.
 
@@ -415,13 +419,19 @@ snapshot: `{"records": [...], "highSeq", "more"}`. A tombstone carries only
 
 This endpoint is for device sessions only.
 
-A Server-Sent Events stream with a `seq` event. The current value is sent at
-once, and again each time it advances:
+A Server-Sent Events stream. A `seq` event carries the group's newest
+sequence number: it is sent at once, and again each time it advances. A
+`chain` event is sent each time an operation is appended to the chain.
 
 ```
 event: seq
 data: {"highSeq":12}
+
+event: chain
+data: {"headIndex":3}
 ```
+
+Clients ignore event types they do not know.
 
 - The server sends keep-alive comments every 15 s. Clients reconnect with
   backoff.

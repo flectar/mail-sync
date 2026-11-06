@@ -36,6 +36,8 @@ pub enum StoreError {
     DeviceLimit,
     #[error("the recovery key belongs to another group")]
     RecoveryKeyTaken,
+    #[error("a record was sealed for another key epoch")]
+    StaleEpoch,
     #[error("{0}")]
     Invalid(&'static str),
     #[error("invalid operation: {0}")]
@@ -310,9 +312,7 @@ impl Store {
                 .filter_map(|change| change.payload.as_ref())
                 .any(|payload| payload.epoch != epoch)
             {
-                return Err(StoreError::Invalid(
-                    "a record was sealed for another key epoch",
-                ));
+                return Err(StoreError::StaleEpoch);
             }
             let added: u64 = changes
                 .iter()

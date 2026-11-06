@@ -3,6 +3,7 @@
 pub mod pairing;
 
 use crate::error::ApiError;
+use crate::events::Update;
 use crate::limits::{bucket, client_address};
 use crate::sessions::{Principal, SessionError};
 use crate::store::{CommitOutcome, NewGroup, Payload, PendingChange, WrapIn};
@@ -17,9 +18,10 @@ use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use flectar_mail_sync_crypto::{Op, OpKind, RECOVERY_ID, SignPublicKey, random_bytes, verify_auth};
 use flectar_mail_sync_proto::{
-    AppendOp, Appended, Bytes, Challenge, ChallengeRequest, Change, Changes, CommitRequest,
-    CommitResponse, Committed, CreateGroup, CurrentWrap, GroupCreated, Info, ItemError, OpsPage,
-    PROTOCOL_VERSION, Record, SeqEvent, Session, SessionRequest, SignedOp, Wrap, len,
+    AppendOp, Appended, Bytes, ChainEvent, Challenge, ChallengeRequest, Change, Changes,
+    CommitRequest, CommitResponse, Committed, CreateGroup, CurrentWrap, GroupCreated, Info,
+    ItemError, OpsPage, PROTOCOL_VERSION, Record, SeqEvent, Session, SessionRequest, SignedOp,
+    Wrap, len,
 };
 use serde::Deserialize;
 use std::collections::HashSet;
@@ -376,7 +378,7 @@ pub async fn commit(
         .await?
     {
         CommitOutcome::Applied { high_seq, seqs } => {
-            state.events.publish(group_id, high_seq);
+            state.events.publish(group_id, Update::Seq(high_seq));
             Ok(Json(CommitResponse {
                 high_seq,
                 results: seqs
@@ -439,14 +441,20 @@ pub async fn changes(
     }))
 }
 
-fn seq_event(high_seq: u64) -> Event {
-    Event::default()
-        .event("seq")
-        .json_data(SeqEvent { high_seq })
-        .unwrap_or_default()
+fn sse_event(update: Update) -> Event {
+    match update {
+        Update::Seq(high_seq) => Event::default()
+            .event("seq")
+            .json_data(SeqEvent { high_seq }),
+        Update::Chain(head_index) => Event::default()
+            .event("chain")
+            .json_data(ChainEvent { head_index }),
+    }
+    .unwrap_or_default()
 }
 
-/// Server-Sent Events: the current `high_seq` first, then every advance.
+/// Server-Sent Events: the current `high_seq` first, then every advance and
+/// every operation appended to the chain.
 pub async fn events(
     State(state): State<AppState>,
     auth: Authed,
@@ -456,9 +464,9 @@ pub async fn events(
     // Subscribe before reading, so no advance between the two is missed.
     let updates = state.events.subscribe(group_id);
     let current = state.store.high_seq(group_id).await?;
-    let first = tokio_stream::once(Ok(seq_event(current)));
+    let first = tokio_stream::once(Ok(sse_event(Update::Seq(current))));
     let rest = BroadcastStream::new(updates).filter_map(|update| match update {
-        Ok(high_seq) => Some(Ok(seq_event(high_seq))),
+        Ok(update) => Some(Ok(sse_event(update))),
         // A lagging listener skipped values; the next one carries the newest.
         Err(_) => None,
     });
@@ -524,6 +532,9 @@ pub async fn append_op(
             now_ms(),
         )
         .await?;
+    state
+        .events
+        .publish(group_id, Update::Chain(outcome.state.head_index));
     match &outcome.op.kind {
         OpKind::RemoveDevice(remove) => {
             state.sessions.revoke_device(Principal {

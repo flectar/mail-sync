@@ -466,6 +466,13 @@ pub struct SeqEvent {
     pub high_seq: u64,
 }
 
+/// Data of the `chain` server-sent event: an operation was appended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChainEvent {
+    pub head_index: u64,
+}
+
 /// Machine-readable error category.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -480,10 +487,16 @@ pub enum ErrorCode {
     Gone,
     /// The group was deleted.
     GroupDeleted,
+    /// A record was sealed for another key epoch than the group's current
+    /// one: read the chain, fetch the current root key and seal again.
+    StaleEpoch,
     PayloadTooLarge,
     QuotaExceeded,
     RateLimited,
     Internal,
+    /// A code this version does not know, from a newer server.
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -506,6 +519,14 @@ pub struct ErrorBody {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unknown_error_codes_still_parse() {
+        let body: ErrorBody =
+            serde_json::from_str(r#"{"error": {"code": "from_the_future", "message": "x"}}"#)
+                .unwrap();
+        assert_eq!(body.error.code, ErrorCode::Unknown);
+    }
 
     #[test]
     fn bytes_use_unpadded_base64url() {

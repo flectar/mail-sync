@@ -16,6 +16,7 @@ pub enum ApiError {
     GroupDeleted,
     GroupExists,
     RecoveryKeyTaken,
+    StaleEpoch,
     ChainMoved,
     PairingConflict(String),
     Conflicts(Vec<([u8; 16], u64)>),
@@ -46,6 +47,7 @@ impl From<StoreError> for ApiError {
             StoreError::QuotaExceeded => Self::QuotaExceeded,
             StoreError::DeviceLimit => Self::DeviceLimit,
             StoreError::RecoveryKeyTaken => Self::RecoveryKeyTaken,
+            StoreError::StaleEpoch => Self::StaleEpoch,
             StoreError::Invalid(message) => Self::BadRequest(message.into()),
             StoreError::Sqlite(_) | StoreError::Task(_) => {
                 tracing::error!(%error, "storage failure");
@@ -103,6 +105,13 @@ impl IntoResponse for ApiError {
                 StatusCode::CONFLICT,
                 ErrorCode::Conflict,
                 "the group already exists".into(),
+                vec![],
+            ),
+            Self::StaleEpoch => (
+                StatusCode::CONFLICT,
+                ErrorCode::StaleEpoch,
+                "a record was sealed for another key epoch; read the chain and fetch the current root key"
+                    .into(),
                 vec![],
             ),
             Self::RecoveryKeyTaken => (

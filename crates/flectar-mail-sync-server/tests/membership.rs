@@ -197,7 +197,8 @@ async fn removing_a_device_locks_it_out_and_rotation_moves_everyone_to_a_new_key
         .unwrap();
     assert_eq!(previous.as_bytes(), laptop.root.as_bytes());
 
-    // Writes sealed for the old epoch are refused.
+    // Writes sealed for the old epoch are refused, with a code that tells
+    // the writer to fetch the new key.
     let uri = format!("/v1/groups/{}/commit", laptop.group());
     let (status, body) = h
         .call(
@@ -207,7 +208,8 @@ async fn removing_a_device_locks_it_out_and_rotation_moves_everyone_to_a_new_key
             Some(json!({"items": [put(&laptop, [1; 16], 0, b"x")]})),
         )
         .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["error"]["code"], "stale_epoch");
     laptop.root = root;
     laptop.epoch = 2;
     let (status, _) = h
@@ -617,8 +619,16 @@ async fn removing_a_device_ends_the_groups_event_streams() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    let end = tokio::time::timeout(Duration::from_secs(5), events.frame())
-        .await
-        .expect("the stream ends");
-    assert!(end.is_none());
+    // The stream announces the new chain head, then ends.
+    let mut next = async || {
+        tokio::time::timeout(Duration::from_secs(5), events.frame())
+            .await
+            .expect("the stream moves on")
+            .map(|frame| String::from_utf8(frame.unwrap().into_data().unwrap().to_vec()).unwrap())
+    };
+    assert_eq!(
+        next().await.as_deref(),
+        Some("event: chain\ndata: {\"headIndex\":2}\n\n")
+    );
+    assert_eq!(next().await, None);
 }
