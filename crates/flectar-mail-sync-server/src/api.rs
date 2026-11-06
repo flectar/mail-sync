@@ -11,8 +11,8 @@ use crate::{AppState, now_ms};
 use axum::Json;
 use axum::extract::rejection::JsonRejection;
 use axum::extract::{ConnectInfo, FromRequestParts, Path, Query, Request, State};
-use axum::http::StatusCode;
 use axum::http::request::Parts;
+use axum::http::{HeaderName, StatusCode};
 use axum::middleware::Next;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
@@ -459,7 +459,13 @@ pub async fn events(
     State(state): State<AppState>,
     auth: Authed,
     Path(group): Path<String>,
-) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, ApiError> {
+) -> Result<
+    (
+        [(HeaderName, &'static str); 1],
+        Sse<impl Stream<Item = Result<Event, Infallible>>>,
+    ),
+    ApiError,
+> {
     let group_id = auth.device_group(&group)?;
     // Subscribe before reading, so no advance between the two is missed.
     let updates = state.events.subscribe(group_id);
@@ -470,7 +476,12 @@ pub async fn events(
         // A lagging listener skipped values; the next one carries the newest.
         Err(_) => None,
     });
-    Ok(Sse::new(first.chain(rest)).keep_alive(KeepAlive::new().interval(Duration::from_secs(15))))
+    Ok((
+        // nginx buffers proxied responses unless told not to, which would
+        // hold events back.
+        [(HeaderName::from_static("x-accel-buffering"), "no")],
+        Sse::new(first.chain(rest)).keep_alive(KeepAlive::new().interval(Duration::from_secs(15))),
+    ))
 }
 
 #[derive(Debug, Deserialize)]

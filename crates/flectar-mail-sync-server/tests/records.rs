@@ -431,6 +431,7 @@ async fn event_streams_announce_new_sequence_numbers() {
         response.headers()[header::CONTENT_TYPE],
         "text/event-stream"
     );
+    assert_eq!(response.headers()["x-accel-buffering"], "no");
     let mut body = response.into_body();
     let mut next_event = async || {
         let frame = tokio::time::timeout(Duration::from_secs(5), body.frame())
