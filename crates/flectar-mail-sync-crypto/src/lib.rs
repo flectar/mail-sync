@@ -30,7 +30,10 @@ pub use op::{
     ResetRecovery, Rotate, device_binding_message, op_hash, recovery_binding_message, sign_op,
     verify_op,
 };
-pub use pairing::{Direction, PairingSecret, approval_words};
+pub use pairing::{
+    INVITE_INDEX, Invite, JOIN_REQUEST_INDEX, JOIN_RESULT_INDEX, JoinRequest, JoinResult,
+    PairingSecret, approval_words,
+};
 pub use record::{collection_tag, open_record, pad, seal_record, unpad};
 pub use recovery::RecoveryCode;
 

@@ -341,7 +341,7 @@ pub fn recovery_binding_message(
     Ok(message)
 }
 
-fn put_var(out: &mut Vec<u8>, value: &[u8], max: usize) -> Result<()> {
+pub(crate) fn put_var(out: &mut Vec<u8>, value: &[u8], max: usize) -> Result<()> {
     if value.len() > max {
         return Err(Error::Malformed("field is longer than allowed"));
     }
@@ -351,7 +351,7 @@ fn put_var(out: &mut Vec<u8>, value: &[u8], max: usize) -> Result<()> {
     Ok(())
 }
 
-fn put_device(out: &mut Vec<u8>, device: &DeviceKeys) -> Result<()> {
+pub(crate) fn put_device(out: &mut Vec<u8>, device: &DeviceKeys) -> Result<()> {
     out.extend_from_slice(&device.device_id);
     out.extend_from_slice(&device.sign_public_key);
     put_var(out, &device.kem_public_key, MAX_KEM_PUBLIC_KEY_BYTES)
@@ -370,27 +370,27 @@ fn put_authorizer(out: &mut Vec<u8>, authorizer: Authorizer) {
     }
 }
 
-struct Reader<'a>(&'a [u8]);
+pub(crate) struct Reader<'a>(pub(crate) &'a [u8]);
 
 impl<'a> Reader<'a> {
-    fn take(&mut self, n: usize) -> Result<&'a [u8]> {
+    pub(crate) fn take(&mut self, n: usize) -> Result<&'a [u8]> {
         if self.0.len() < n {
-            return Err(Error::Malformed("operation is truncated"));
+            return Err(Error::Malformed("truncated"));
         }
         let (head, rest) = self.0.split_at(n);
         self.0 = rest;
         Ok(head)
     }
 
-    fn byte(&mut self) -> Result<u8> {
+    pub(crate) fn byte(&mut self) -> Result<u8> {
         Ok(self.take(1)?[0])
     }
 
-    fn array<const N: usize>(&mut self) -> Result<[u8; N]> {
+    pub(crate) fn array<const N: usize>(&mut self) -> Result<[u8; N]> {
         Ok(self.take(N)?.try_into().expect("take returned N bytes"))
     }
 
-    fn var(&mut self, max: usize) -> Result<&'a [u8]> {
+    pub(crate) fn var(&mut self, max: usize) -> Result<&'a [u8]> {
         let len = usize::from(u16::from_be_bytes(self.array()?));
         if len > max {
             return Err(Error::Malformed("field is longer than allowed"));
@@ -398,7 +398,7 @@ impl<'a> Reader<'a> {
         self.take(len)
     }
 
-    fn device(&mut self) -> Result<DeviceKeys> {
+    pub(crate) fn device(&mut self) -> Result<DeviceKeys> {
         Ok(DeviceKeys {
             device_id: self.array()?,
             sign_public_key: self.array()?,

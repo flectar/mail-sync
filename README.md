@@ -42,6 +42,9 @@ FLECTAR_MAIL_SYNC_PUBLIC_URL=https://sync.example.org \
 | `FLECTAR_MAIL_SYNC_DATABASE` | `/data/sync.db` | SQLite database file |
 | `FLECTAR_MAIL_SYNC_LISTEN` | `0.0.0.0:8080` | Listen address |
 | `FLECTAR_MAIL_SYNC_READERS` | `4` | Reader connections |
+| `FLECTAR_MAIL_SYNC_TRUSTED_PROXIES` | (none) | Comma-separated addresses or CIDR ranges of reverse proxies whose `X-Forwarded-For` is believed. Rate limits count per client address, so set this behind a proxy. |
+| `FLECTAR_MAIL_SYNC_MAX_GROUP_BYTES` | `67108864` | Stored bytes per group |
+| `FLECTAR_MAIL_SYNC_MAX_DEVICES` | `25` | Devices per group |
 | `RUST_LOG` | `info` | Log filter; logs are JSON |
 
 Other subcommands:

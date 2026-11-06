@@ -249,6 +249,59 @@ pub struct Session {
     pub group_id: Bytes,
 }
 
+/// `POST /v1/pairing`: open a pairing slot (SPEC §6.12).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreatePairing {
+    /// Also hand out a short code that finds the slot, for devices that
+    /// cannot scan a QR code.
+    #[serde(default)]
+    pub code: bool,
+}
+
+/// Response to [`CreatePairing`].
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PairingCreated {
+    pub slot_id: Bytes,
+    /// Eight digits, when a code was asked for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
+    /// Milliseconds since the Unix epoch.
+    pub expires_at: i64,
+}
+
+/// Response to `GET /v1/pairing/codes/{code}`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PairingSlot {
+    pub slot_id: Bytes,
+}
+
+/// `PUT /v1/pairing/{slot}/messages/{index}`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PutPairingMessage {
+    pub message: Bytes,
+}
+
+/// One message of a pairing slot.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PairingMessage {
+    pub index: u32,
+    pub message: Bytes,
+}
+
+/// Response to `GET /v1/pairing/{slot}/messages`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PairingMessages {
+    pub messages: Vec<PairingMessage>,
+    /// Milliseconds since the Unix epoch.
+    pub expires_at: i64,
+}
+
 /// One change in a commit: either a new ciphertext for the record or its
 /// deletion.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

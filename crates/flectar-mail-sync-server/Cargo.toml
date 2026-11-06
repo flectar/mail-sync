@@ -14,6 +14,7 @@ base64.workspace = true
 clap.workspace = true
 flectar-mail-sync-crypto.workspace = true
 flectar-mail-sync-proto.workspace = true
+ipnet.workspace = true
 rusqlite.workspace = true
 serde.workspace = true
 serde_json.workspace = true

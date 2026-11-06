@@ -1,7 +1,8 @@
 use clap::{Parser, Subcommand};
 use flectar_mail_sync_server::{Config, State, Store, run_maintenance, serve as serve_until};
+use ipnet::IpNet;
 use std::io::{Read, Write};
-use std::net::{SocketAddr, TcpStream};
+use std::net::{IpAddr, SocketAddr, TcpStream};
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
@@ -64,6 +65,30 @@ struct ServeArgs {
     /// Reader connections to the database.
     #[arg(long, env = "FLECTAR_MAIL_SYNC_READERS", default_value_t = 4)]
     readers: usize,
+    /// Reverse proxies whose X-Forwarded-For entries are believed, as
+    /// comma-separated addresses or CIDR ranges. Rate limits apply per
+    /// client address, so set this when a proxy sits in front.
+    #[arg(
+        long,
+        env = "FLECTAR_MAIL_SYNC_TRUSTED_PROXIES",
+        value_delimiter = ',',
+        value_parser = parse_network
+    )]
+    trusted_proxies: Vec<IpNet>,
+    /// Stored bytes per group.
+    #[arg(long, env = "FLECTAR_MAIL_SYNC_MAX_GROUP_BYTES", default_value_t = 64 * 1024 * 1024)]
+    max_group_bytes: u64,
+    /// Devices per group.
+    #[arg(long, env = "FLECTAR_MAIL_SYNC_MAX_DEVICES", default_value_t = 25)]
+    max_devices: u32,
+}
+
+/// A CIDR range, or a single address.
+fn parse_network(text: &str) -> Result<IpNet, String> {
+    let text = text.trim();
+    text.parse::<IpNet>()
+        .or_else(|_| text.parse::<IpAddr>().map(IpNet::from))
+        .map_err(|_| format!("{text:?} is not an IP address or CIDR range"))
 }
 
 fn main() -> ExitCode {
@@ -122,7 +147,11 @@ async fn serve(args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
         std::fs::create_dir_all(parent)?;
     }
     let store = Store::open(&args.database, args.readers)?;
-    let state = State::new(Config::new(public_url), store);
+    let mut config = Config::new(public_url);
+    config.trusted_proxies = args.trusted_proxies;
+    config.limits.max_group_bytes = args.max_group_bytes;
+    config.limits.max_devices = args.max_devices;
+    let state = State::new(config, store);
     tokio::spawn(run_maintenance(state.clone()));
     let listener = tokio::net::TcpListener::bind(args.listen).await?;
     tracing::info!(listen = %args.listen, "serving");

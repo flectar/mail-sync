@@ -1,4 +1,7 @@
+use crate::limits::Rates;
+use crate::pairing::PairingLimits;
 use flectar_mail_sync_proto::Limits;
+use ipnet::IpNet;
 use std::time::Duration;
 
 /// Server settings. `main` fills them from flags and environment variables.
@@ -12,6 +15,10 @@ pub struct Config {
     pub session_ttl: Duration,
     /// How long deletions stay visible before their tombstones are dropped.
     pub tombstone_retention: Duration,
+    pub rates: Rates,
+    /// Reverse proxies whose `X-Forwarded-For` entries are believed.
+    pub trusted_proxies: Vec<IpNet>,
+    pub pairing: PairingLimits,
 }
 
 impl Config {
@@ -29,6 +36,14 @@ impl Config {
             challenge_ttl: Duration::from_secs(120),
             session_ttl: Duration::from_secs(3600),
             tombstone_retention: Duration::from_secs(180 * 24 * 3600),
+            rates: Rates::default(),
+            trusted_proxies: Vec::new(),
+            pairing: PairingLimits {
+                max_slots: 1024,
+                max_messages: 4,
+                max_message_bytes: 4096,
+                ttl_ms: 10 * 60 * 1000,
+            },
         }
     }
 }

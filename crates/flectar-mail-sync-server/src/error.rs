@@ -1,8 +1,9 @@
 use crate::store::StoreError;
 use axum::Json;
-use axum::http::StatusCode;
+use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use flectar_mail_sync_proto::{Bytes, Conflict, ErrorBody, ErrorCode, ErrorDetail};
+use std::time::Duration;
 
 /// Every error a handler can answer with. The response body is always an
 /// [`ErrorBody`].
@@ -16,12 +17,14 @@ pub enum ApiError {
     GroupExists,
     RecoveryKeyTaken,
     ChainMoved,
+    PairingConflict(String),
     Conflicts(Vec<([u8; 16], u64)>),
     Gone,
     PayloadTooLarge(String),
     QuotaExceeded,
     DeviceLimit,
-    RateLimited,
+    /// Try again after the duration, which goes into `Retry-After`.
+    RateLimited(Duration),
     Internal,
 }
 
@@ -54,6 +57,11 @@ impl From<StoreError> for ApiError {
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
+        let retry_after = match &self {
+            // Whole seconds, rounded up (RFC 9110 §10.2.3).
+            Self::RateLimited(wait) => Some(wait.as_secs() + u64::from(wait.subsec_nanos() > 0)),
+            _ => None,
+        };
         let (status, code, message, conflicts) = match self {
             Self::BadRequest(message) => (
                 StatusCode::BAD_REQUEST,
@@ -103,6 +111,9 @@ impl IntoResponse for ApiError {
                 "the recovery key belongs to another group".into(),
                 vec![],
             ),
+            Self::PairingConflict(message) => {
+                (StatusCode::CONFLICT, ErrorCode::Conflict, message, vec![])
+            }
             Self::Conflicts(stale) => (
                 StatusCode::CONFLICT,
                 ErrorCode::Conflict,
@@ -139,7 +150,7 @@ impl IntoResponse for ApiError {
                 "the group has reached its device limit".into(),
                 vec![],
             ),
-            Self::RateLimited => (
+            Self::RateLimited(_) => (
                 StatusCode::TOO_MANY_REQUESTS,
                 ErrorCode::RateLimited,
                 "too many requests; try again later".into(),
@@ -152,13 +163,19 @@ impl IntoResponse for ApiError {
                 vec![],
             ),
         };
-        (
+        let mut response = (
             status,
             Json(ErrorBody {
                 error: ErrorDetail { code, message },
                 conflicts,
             }),
         )
-            .into_response()
+            .into_response();
+        if let Some(seconds) = retry_after {
+            response
+                .headers_mut()
+                .insert(header::RETRY_AFTER, HeaderValue::from(seconds.max(1)));
+        }
+        response
     }
 }

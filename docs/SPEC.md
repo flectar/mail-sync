@@ -179,21 +179,48 @@ signing key signs.
 
 ### 4.9 Pairing
 
-- **Pairing secret:** 32 random bytes. The existing device shows it in a QR
-  code.
-- **Pairing messages:**
-  `nonce (24) || XChaCha20-Poly1305(HKDF(secret, PAIRING), nonce, message, aad)`,
-  where:
-  - `aad = PAIRING || slot_id || direction`
-  - direction 1 is the offer, sent by the new device; direction 2 is the
-    answer, sent by the existing device.
-- **Approval words**, used when no camera is available:
-  1. Compute `SHA-256(FINGERPRINT || group_id || head_hash || device_id || sign_public_key || u64be(len(kem_public_key)) || kem_public_key)`.
-  2. Take its first 66 bits.
-  3. Read them as six 11-bit indices into the BIP39 English list.
+The device that shows a code opens a pairing slot (§6.12). Either device may
+do so. The two devices then exchange three messages through it:
 
-  Both devices show the six words. They differ if a server swapped the new
-  device's keys or the group.
+| Index | Message | From | Content |
+|---|---|---|---|
+| 0 | invite | existing device | `0x01 \|\| group_id (16) \|\| u64be(head_index) \|\| head_hash (32) \|\| var server_url` |
+| 1 | join request | new device | `0x01 \|\| device keys \|\| binding_signature (64)` |
+| 2 | join result | existing device | `0x01 \|\| 0x01 \|\| u64be(index of the add_device operation)`, or `0x01 \|\| 0x02` if declined |
+
+- **Invite:** the group's server URL may differ from the server holding the
+  slot. The head is the latest chain head the existing device has verified.
+- **Join request:** device keys are encoded as in §5.1, and the binding
+  signature is the one `add_device` carries (§5.2), made for the invited
+  group.
+- **Checks by the new device:** after it is added, it logs in and accepts the
+  chain only if the operation at `head_index` hashes to `head_hash`. Then it
+  unwraps its root key and checks the commitment (§4.4).
+
+**With a QR code:** the code carries the slot's server, the slot id and a
+pairing secret of 32 random bytes:
+
+```
+flectar-mail-sync:pair?v=1&server=<percent-encoded URL>&slot=<slot id>&secret=<secret>
+```
+
+Every message is sealed under the secret:
+`nonce (24) || XChaCha20-Poly1305(HKDF(secret, PAIRING), nonce, message, aad)`,
+where `aad = PAIRING || slot_id || index` and `index` is one byte. Binding
+the index keeps a server from passing one side's message off as the other's.
+
+**With a short code**, for devices without a camera: the slot is opened with
+an eight-digit code (§6.12), which the user types on the new device. The
+messages travel in the clear, and the user compares **approval words** on
+both screens before the existing device adds the new one:
+
+1. Compute `SHA-256(FINGERPRINT || group_id || head_hash || device_id || sign_public_key || u64be(len(kem_public_key)) || kem_public_key)`.
+2. Take its first 66 bits.
+3. Read them as six 11-bit indices into the BIP39 English list.
+
+The existing device computes them from its own group and head and the keys it
+received; the new device from the invite it received and its own keys. They
+differ if a server swapped the keys, the group or the head.
 
 ## 5. Membership chain
 
@@ -449,11 +476,54 @@ Returns `{"epoch", "ciphertext"}`: the current epoch's wrap for the session's
 device, or for recovery in a recovery session. If there is none, it answers
 `404`.
 
-### 6.12 Pairing rendezvous *(planned)*
+### 6.12 Pairing slots
 
-One-time slots where a new device and an existing one exchange encrypted
-pairing messages (§4.9), or public keys plus approval words when no camera is
-available.
+Short-lived mailboxes for the messages of §4.9. They need no session: the new
+device has none yet. Whoever knows a slot id may use the slot, so slot ids
+are random and only travel in QR codes, and the messages are sealed or
+checked with approval words.
+
+- `POST /v1/pairing` with `{"code": false}` opens a slot. It answers
+  `201 {"slotId", "expiresAt"}`, plus `"code"` when `true` was asked: eight
+  digits that find the slot once.
+- `GET /v1/pairing/codes/{code}` answers `{"slotId"}`, or `404`. A code works
+  only once, so someone guessing codes can find a slot only before its owner
+  does.
+- `PUT /v1/pairing/{slot}/messages/{index}` with `{"message"}` stores a
+  message at `index`, which must be the next free one.
+  - `201` stores it; `200` means the same message was already there, so
+    writers can retry.
+  - `409` if another message is at `index`, or `index` skips ahead.
+  - `413` past the size or message limit.
+- `GET /v1/pairing/{slot}/messages?from=N&wait=S` returns
+  `{"messages": [{"index", "message"}, …], "expiresAt"}` with the messages
+  from index `N` on. If there are none, it waits up to `S` seconds (at most
+  25) for one to arrive, then answers with an empty list.
+- `DELETE /v1/pairing/{slot}` ends the slot. Either device does so when done.
+
+An unknown or expired slot answers `404`. Slots live in memory; a server
+restart ends them.
+
+### 6.13 Rate limits
+
+Over a limit, the server answers `429 rate_limited` with a `Retry-After`
+header in seconds. Limits are bursts refilled at a steady rate (GCRA):
+
+| Endpoints | Counted per | Default burst | Default refill |
+|---|---|---|---|
+| `POST /v1/groups` | client address | 5 | 1 per 6 min |
+| `POST /v1/auth/challenge`, `POST /v1/auth/session` | client address | 40 | 1 per 5 s |
+| pairing slots and messages | client address | 60 | 1 per 2 s |
+| `GET /v1/pairing/codes/{code}` | client address | 5 | 1 per 30 s |
+| endpoints with a session | group | 300 | 1 per 100 ms |
+
+- **Client address:** IPv6 addresses count per /64 network.
+- **Behind a proxy:** when the connecting peer is a configured trusted
+  proxy, the client address is the rightmost `X-Forwarded-For` entry that is
+  not a trusted proxy. Entries to its left come from the client and are
+  ignored.
+- **Too many pairings:** when too many slots are open, `POST /v1/pairing`
+  also answers `429`.
 
 ## 7. Device flows (informative)
 
@@ -463,15 +533,19 @@ available.
   3. Sign the genesis with both keys.
   4. Wrap `K_1` for recovery and send `POST /v1/groups`.
 - **Add a device with a QR code:**
-  1. The existing device shows the server URL, the group id, the chain's
-     head hash and a pairing secret.
-  2. The new device sends its keys and a binding signature in a sealed offer.
+  1. One device opens a slot and shows the QR code. A phone usually scans a
+     computer's screen, whichever of the two is new.
+  2. The existing device writes the invite. The new device reads it, and
+     writes its join request.
   3. The existing device appends `add_device`, with a wrap of the current
-     root key for the new device.
-  4. The new device logs in, verifies the chain against the head hash from
-     the QR code, unwraps its key and checks the commitment.
-- **Add a device without a camera:** the same, except that the user compares
-  approval words (§4.9) on both screens before the existing device appends.
+     root key for the new device. Then it writes the join result.
+  4. The new device logs in, checks the chain against the invite's head,
+     unwraps its key and checks the commitment. Either device deletes the
+     slot.
+- **Add a device without a camera:** the existing device opens a slot with a
+  code and shows the code. The user types it on the new device. Before the
+  existing device appends `add_device`, the user checks that both screens
+  show the same approval words (§4.9).
 - **Recover:**
   1. Type the 24 words and the server's address.
   2. Log in with the recovery key. The session response names the group.
@@ -513,8 +587,8 @@ One sync cycle:
 
 ## 9. Limits
 
-These are the defaults. A server may configure others and reports them in
-`/v1/info`.
+These are the defaults. A server may configure others; `/v1/info` reports
+the ones clients must respect.
 
 | Limit | Default |
 |---|---|
@@ -524,6 +598,10 @@ These are the defaults. A server may configure others and reports them in
 | Stored bytes per group | 64 MiB |
 | Records or operations per page | 1000 |
 | Devices per group | 25 |
+| Open pairing slots per server | 1024 |
+| Pairing slot lifetime | 10 min |
+| Messages per pairing slot | 4 |
+| Pairing message | 4096 bytes |
 | Wrap size | 4096 bytes |
 | Challenge lifetime | 120 s |
 | Session lifetime | 1 h |
@@ -558,3 +636,12 @@ These are the defaults. A server may configure others and reports them in
   hashes.
 - **Removed devices:** a removed device keeps what it already saw. After
   `rotate`, it cannot read anything new.
+- **Pairing:**
+  - Root keys never pass through a slot: they are wrapped to the new
+    device's KEM key and checked against the chain's commitment.
+  - With a QR code, the server relays only ciphertext bound to the slot and
+    the message's index.
+  - With a short code, the server, or whoever guesses the code first, can
+    read the invite: the group id, the chain head and the server URL, none of
+    them secret. It can only add its own keys if the user accepts approval
+    words that differ.

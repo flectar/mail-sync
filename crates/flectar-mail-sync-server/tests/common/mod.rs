@@ -5,7 +5,8 @@
 
 use axum::Router;
 use axum::body::Body;
-use axum::http::{Method, Request, StatusCode, header};
+use axum::extract::connect_info::MockConnectInfo;
+use axum::http::{HeaderMap, Method, Request, StatusCode, header};
 use flectar_mail_sync_crypto::{
     AddDevice, Authorizer, DeviceKeys, DeviceSigningKey, Genesis, GroupState, KemSecretKey, Op,
     OpKind, RECOVERY_ID, RecoveryCode, ResetRecovery, RootKey, collection_tag,
@@ -19,6 +20,8 @@ use serde_json::{Value, json};
 use tower::ServiceExt;
 
 pub const AUDIENCE: &str = "https://sync.test";
+/// The address every test request comes from.
+pub const PEER: ([u8; 4], u16) = ([192, 0, 2, 10], 50_000);
 
 pub struct Harness {
     _dir: tempfile::TempDir,
@@ -37,7 +40,7 @@ impl Harness {
         let mut config = Config::new(AUDIENCE);
         adjust(&mut config);
         let state = State::new(config, store);
-        let router = app(state.clone());
+        let router = app(state.clone()).layer(MockConnectInfo(std::net::SocketAddr::from(PEER)));
         Self {
             _dir: dir,
             state,
@@ -52,9 +55,26 @@ impl Harness {
         token: Option<&str>,
         body: Option<Value>,
     ) -> (StatusCode, Value) {
+        let (status, _, value) = self.call_with(method, uri, token, body, &[]).await;
+        (status, value)
+    }
+
+    /// Like [`Harness::call`], with extra request headers, and the response
+    /// headers too.
+    pub async fn call_with(
+        &self,
+        method: Method,
+        uri: &str,
+        token: Option<&str>,
+        body: Option<Value>,
+        headers: &[(&str, &str)],
+    ) -> (StatusCode, HeaderMap, Value) {
         let mut request = Request::builder().method(method).uri(uri);
         if let Some(token) = token {
             request = request.header(header::AUTHORIZATION, format!("Bearer {token}"));
+        }
+        for (name, value) in headers {
+            request = request.header(*name, *value);
         }
         let request = match body {
             Some(body) => request
@@ -65,6 +85,7 @@ impl Harness {
         };
         let response = self.router.clone().oneshot(request).await.unwrap();
         let status = response.status();
+        let response_headers = response.headers().clone();
         let bytes = response.into_body().collect().await.unwrap().to_bytes();
         let value = if bytes.is_empty() {
             Value::Null
@@ -72,7 +93,7 @@ impl Harness {
             serde_json::from_slice(&bytes)
                 .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(&bytes).into()))
         };
-        (status, value)
+        (status, response_headers, value)
     }
 }
 
@@ -254,8 +275,8 @@ pub async fn login(h: &Harness, device: &Device) -> String {
         .expect("the device logs in")
 }
 
-/// The group's chain, fetched and verified like a device would.
-pub async fn chain(h: &Harness, token: &str, group: &str) -> GroupState {
+/// The group's operations and their signatures, as stored.
+pub async fn ops(h: &Harness, token: &str, group: &str) -> Vec<(Vec<u8>, Vec<Vec<u8>>)> {
     let (status, page) = h
         .call(
             Method::GET,
@@ -265,7 +286,7 @@ pub async fn chain(h: &Harness, token: &str, group: &str) -> GroupState {
         )
         .await;
     assert_eq!(status, StatusCode::OK, "{page}");
-    let ops: Vec<(Vec<u8>, Vec<Vec<u8>>)> = page["ops"]
+    page["ops"]
         .as_array()
         .unwrap()
         .iter()
@@ -280,7 +301,12 @@ pub async fn chain(h: &Harness, token: &str, group: &str) -> GroupState {
                     .collect(),
             )
         })
-        .collect();
+        .collect()
+}
+
+/// The group's chain, fetched and verified like a device would.
+pub async fn chain(h: &Harness, token: &str, group: &str) -> GroupState {
+    let ops = ops(h, token, group).await;
     GroupState::replay(ops.iter().map(|(op, signatures)| {
         (
             op.as_slice(),

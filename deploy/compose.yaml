@@ -14,6 +14,10 @@ services:
     restart: unless-stopped
     environment:
       FLECTAR_MAIL_SYNC_PUBLIC_URL: https://${SYNC_DOMAIN:?set SYNC_DOMAIN to the server's domain}
+      # Caddy reaches the server over the compose network and passes the
+      # client's address in X-Forwarded-For. Trusting private ranges is safe
+      # only because this service publishes no ports.
+      FLECTAR_MAIL_SYNC_TRUSTED_PROXIES: 10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,fc00::/7
     volumes:
       - sync-data:/data
 

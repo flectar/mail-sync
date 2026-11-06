@@ -1,14 +1,18 @@
 //! HTTP handlers (SPEC §6).
 
+pub mod pairing;
+
 use crate::error::ApiError;
+use crate::limits::{bucket, client_address};
 use crate::sessions::{Principal, SessionError};
 use crate::store::{CommitOutcome, NewGroup, Payload, PendingChange, WrapIn};
 use crate::{AppState, now_ms};
 use axum::Json;
 use axum::extract::rejection::JsonRejection;
-use axum::extract::{FromRequestParts, Path, Query, State};
+use axum::extract::{ConnectInfo, FromRequestParts, Path, Query, Request, State};
 use axum::http::StatusCode;
 use axum::http::request::Parts;
+use axum::middleware::Next;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use flectar_mail_sync_crypto::{Op, OpKind, RECOVERY_ID, SignPublicKey, random_bytes, verify_auth};
@@ -20,12 +24,13 @@ use flectar_mail_sync_proto::{
 use serde::Deserialize;
 use std::collections::HashSet;
 use std::convert::Infallible;
-use std::time::Duration;
+use std::net::SocketAddr;
+use std::time::{Duration, Instant};
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::{Stream, StreamExt};
 
 /// Map a JSON body rejection to our error body.
-fn body<T>(payload: Result<Json<T>, JsonRejection>) -> Result<T, ApiError> {
+pub(crate) fn body<T>(payload: Result<Json<T>, JsonRejection>) -> Result<T, ApiError> {
     match payload {
         Ok(Json(value)) => Ok(value),
         Err(rejection) if rejection.status() == StatusCode::PAYLOAD_TOO_LARGE => Err(
@@ -64,11 +69,50 @@ impl FromRequestParts<AppState> for Authed {
             .filter(|(scheme, _)| scheme.eq_ignore_ascii_case("bearer"))
             .map(|(_, token)| token)
             .ok_or(ApiError::Unauthorized)?;
-        state
+        let principal = state
             .sessions
             .authenticate(token.trim(), now_ms())
-            .map(Authed)
-            .ok_or(ApiError::Unauthorized)
+            .ok_or(ApiError::Unauthorized)?;
+        state
+            .rate_limits
+            .group
+            .check(principal.group_id, Instant::now())
+            .map_err(ApiError::RateLimited)?;
+        Ok(Authed(principal))
+    }
+}
+
+/// Which per-address limit a route counts against.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Limit {
+    CreateGroup,
+    Login,
+    Pairing,
+    PairingCode,
+}
+
+/// Middleware: refuse requests over the client address's rate limit. The
+/// app must be served with connection info, as [`crate::serve`] does.
+pub async fn limit_by_address(
+    State((state, limit)): State<(AppState, Limit)>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let address = bucket(client_address(
+        peer,
+        request.headers(),
+        &state.config.trusted_proxies,
+    ));
+    let limiter = match limit {
+        Limit::CreateGroup => &state.rate_limits.create_group,
+        Limit::Login => &state.rate_limits.login,
+        Limit::Pairing => &state.rate_limits.pairing,
+        Limit::PairingCode => &state.rate_limits.pairing_code,
+    };
+    match limiter.check(address, Instant::now()) {
+        Ok(()) => next.run(request).await,
+        Err(wait) => ApiError::RateLimited(wait).into_response(),
     }
 }
 
@@ -208,7 +252,7 @@ pub async fn challenge(
         .sessions
         .issue_challenge(principal, now_ms())
         .map_err(|error| match error {
-            SessionError::Busy => ApiError::RateLimited,
+            SessionError::Busy => ApiError::RateLimited(Duration::from_secs(10)),
             SessionError::Random => ApiError::Internal,
         })?;
     Ok(Json(Challenge {
