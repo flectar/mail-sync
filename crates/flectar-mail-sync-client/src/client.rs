@@ -339,14 +339,18 @@ impl SyncClient {
     }
 
     /// Run `call` with a session, logging in again once if the session was
-    /// refused.
-    pub(crate) async fn authed<T>(&self, call: impl AsyncFn(&str) -> Result<T>) -> Result<T> {
+    /// refused. The token is passed by value, so the futures stay `Send`.
+    pub(crate) async fn authed<T, F, Fut>(&self, call: F) -> Result<T>
+    where
+        F: Fn(String) -> Fut,
+        Fut: Future<Output = Result<T>>,
+    {
         let token = self.token().await?;
-        let result = match call(&token).await {
+        let result = match call(token).await {
             Err(error) if error.status() == Some(401) => {
                 *self.session.lock().await = None;
                 let token = self.token().await?;
-                call(&token).await
+                call(token).await
             }
             other => other,
         };
@@ -380,7 +384,7 @@ impl SyncClient {
         let mut since = chain.ops.len() as u64 - 1;
         loop {
             let page = match self
-                .authed(async |token| self.http.ops(token, &group_id, since).await)
+                .authed(|token| async move { self.http.ops(&token, &group_id, since).await })
                 .await
             {
                 Err(Error::LoginRefused) => {
@@ -495,7 +499,7 @@ impl SyncClient {
     async fn restore_ops(&self, chain: &mut Verified) -> Result<()> {
         let group_id = self.identity.group_id();
         let server = self
-            .authed(async |token| self.http.ops(token, &group_id, 0).await)
+            .authed(|token| async move { self.http.ops(&token, &group_id, 0).await })
             .await?;
         if server.more {
             return Err(Error::Untrusted("the server's chain does not match"));
@@ -524,8 +528,11 @@ impl SyncClient {
                     .collect(),
                 wraps: self.wraps_for(chain, index)?,
             };
-            self.authed(async |token| self.http.append_op(token, &group_id, &request).await)
-                .await?;
+            let request = &request;
+            self.authed(
+                |token| async move { self.http.append_op(&token, &group_id, request).await },
+            )
+            .await?;
         }
         Ok(())
     }
@@ -542,7 +549,7 @@ impl SyncClient {
         }
         if !chain.roots.contains_key(&chain.state.epoch) {
             let wrap = self
-                .authed(async |token| self.http.wrap(token, &group_id).await)
+                .authed(|token| async move { self.http.wrap(&token, &group_id).await })
                 .await?;
             if wrap.epoch != chain.state.epoch {
                 // The chain moved since we read it; the caller refreshes.
@@ -608,8 +615,9 @@ impl SyncClient {
             op: Bytes(op),
             wraps,
         };
+        let request = &request;
         match self
-            .authed(async |token| self.http.append_op(token, &group_id, &request).await)
+            .authed(|token| async move { self.http.append_op(&token, &group_id, request).await })
             .await
         {
             Ok(_) => Ok(Append::Done),
@@ -621,13 +629,14 @@ impl SyncClient {
     /// Append the operation `build` makes from the current state, rebuilding
     /// it while other devices move the chain. `build` returns `None` when
     /// the operation is no longer needed.
-    async fn append(
-        &self,
-        build: impl AsyncFn(&GroupState) -> Result<Option<(OpKind, Vec<Wrap>)>>,
-    ) -> Result<GroupState> {
+    async fn append<F, Fut>(&self, build: F) -> Result<GroupState>
+    where
+        F: Fn(GroupState) -> Fut,
+        Fut: Future<Output = Result<Option<(OpKind, Vec<Wrap>)>>>,
+    {
         for _ in 0..APPEND_ATTEMPTS {
             let state = self.refresh().await?;
-            let Some((kind, wraps)) = build(&state).await? else {
+            let Some((kind, wraps)) = build(state.clone()).await? else {
                 return Ok(state);
             };
             if let Append::Done = self.try_append(&state, kind, wraps).await? {
@@ -681,7 +690,7 @@ impl SyncClient {
     ) -> Result<u64> {
         let authorizer = Authorizer::Device(self.identity.device_id());
         let state = self
-            .append(async |state: &GroupState| {
+            .append(|state: GroupState| async move {
                 let (epoch, root) = self.current_root().await?;
                 if epoch != state.epoch {
                     return Err(Error::Untrusted("the key epoch changed while adding"));
@@ -702,7 +711,7 @@ impl SyncClient {
     /// Remove a device, then move everyone else to a new root key.
     pub async fn remove_device(&self, device_id: [u8; 16]) -> Result<()> {
         let authorizer = Authorizer::Device(self.identity.device_id());
-        self.append(async |state: &GroupState| {
+        self.append(|state: GroupState| async move {
             Ok(state.devices.contains_key(&device_id).then(|| {
                 (
                     OpKind::RemoveDevice(RemoveDevice {
@@ -732,7 +741,8 @@ impl SyncClient {
         let authorizer = Authorizer::Device(self.identity.device_id());
         let group_id = self.identity.group_id();
         let fresh = RootKey::generate()?;
-        self.append(async |state: &GroupState| {
+        let new_root = &fresh;
+        self.append(|state: GroupState| async move {
             if if_due && !state.rotation_due {
                 return Ok(None);
             }
@@ -744,15 +754,20 @@ impl SyncClient {
             let mut wraps = state
                 .devices
                 .iter()
-                .map(|(id, member)| self.wrap_for(&member.kem_public_key, next, *id, &fresh))
+                .map(|(id, member)| self.wrap_for(&member.kem_public_key, next, *id, new_root))
                 .collect::<Result<Vec<_>>>()?;
-            wraps.push(self.wrap_for(&state.recovery_kem_public_key, next, RECOVERY_ID, &fresh)?);
+            wraps.push(self.wrap_for(
+                &state.recovery_kem_public_key,
+                next,
+                RECOVERY_ID,
+                new_root,
+            )?);
             Ok(Some((
                 OpKind::Rotate(Rotate {
                     authorizer,
                     epoch: next,
-                    root_commitment: fresh.commitment(&group_id, next),
-                    sealed_previous_root: fresh.seal_previous(&current, &group_id, next)?,
+                    root_commitment: new_root.commitment(&group_id, next),
+                    sealed_previous_root: new_root.seal_previous(&current, &group_id, next)?,
                 }),
                 wraps,
             )))
@@ -789,7 +804,8 @@ impl SyncClient {
             &sign_public_key,
             &kem_public_key,
         )?);
-        self.append(async |state: &GroupState| {
+        let kem_public_key = &kem_public_key;
+        self.append(|state: GroupState| async move {
             let (epoch, root) = self.current_root().await?;
             if epoch != state.epoch {
                 return Err(Error::Untrusted("the key epoch changed while resetting"));
@@ -798,10 +814,10 @@ impl SyncClient {
                 OpKind::ResetRecovery(ResetRecovery {
                     authorizer,
                     recovery_sign_public_key: sign_public_key,
-                    recovery_kem_public_key: kem_public_key.clone(),
+                    recovery_kem_public_key: kem_public_key.to_vec(),
                     binding_signature: binding,
                 }),
-                vec![self.wrap_for(&kem_public_key, epoch, RECOVERY_ID, &root)?],
+                vec![self.wrap_for(kem_public_key, epoch, RECOVERY_ID, &root)?],
             )))
         })
         .await?;
@@ -813,7 +829,7 @@ impl SyncClient {
     /// Delete the group and everything the server holds for it.
     pub async fn delete_group(&self) -> Result<()> {
         let authorizer = Authorizer::Device(self.identity.device_id());
-        self.append(async |_: &GroupState| {
+        self.append(|_: GroupState| async move {
             Ok(Some((
                 OpKind::DeleteGroup(DeleteGroup { authorizer }),
                 vec![],

@@ -281,7 +281,7 @@ impl SyncClient {
     async fn limits(&self) -> Result<Limits> {
         Ok(self
             .limits
-            .get_or_try_init(async || self.http.info().await.map(|info| info.limits))
+            .get_or_try_init(|| async { self.http.info().await.map(|info| info.limits) })
             .await?
             .clone())
     }
@@ -338,7 +338,9 @@ impl SyncClient {
         let mut present = HashSet::new();
         loop {
             let page = match self
-                .authed(async |token| self.http.changes(token, &group_id, since, None).await)
+                .authed(
+                    |token| async move { self.http.changes(&token, &group_id, since, None).await },
+                )
                 .await
             {
                 Err(error) if error.code() == Some(ErrorCode::Gone) && full.is_none() => {
@@ -501,8 +503,9 @@ impl SyncClient {
                 continue;
             }
             let request = CommitRequest { items };
+            let request = &request;
             match self
-                .authed(async |token| self.http.commit(token, &group_id, &request).await)
+                .authed(|token| async move { self.http.commit(&token, &group_id, request).await })
                 .await
             {
                 Ok(CommitOutcome::Committed(response)) => {
@@ -529,7 +532,7 @@ impl SyncClient {
     /// ends when the server closes it; reconnect with backoff.
     pub async fn events(&self) -> Result<impl Stream<Item = Result<Event>> + Send + use<>> {
         let group_id = self.identity.group_id();
-        self.authed(async |token| self.http.events(token, &group_id).await)
+        self.authed(|token| async move { self.http.events(&token, &group_id).await })
             .await
     }
 }

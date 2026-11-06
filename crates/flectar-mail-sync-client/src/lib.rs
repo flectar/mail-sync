@@ -34,3 +34,38 @@ pub use identity::{ChainOp, DeviceIdentity};
 pub use memory::MemoryStore;
 pub use pairing::{Invitation, JoinAttempt, Joining};
 pub use sse::Event;
+
+/// Apps run these futures on multi-threaded runtimes, so each must be
+/// `Send`. This only has to compile.
+#[cfg(test)]
+#[allow(dead_code, clippy::unwrap_used)]
+fn futures_are_send(
+    client: &SyncClient,
+    store: &mut MemoryStore,
+    invitation: &Invitation,
+    attempt: &JoinAttempt,
+    joining: Joining,
+) {
+    fn send<T: Send>(_: T) {}
+    send(client.sync(store));
+    send(client.refresh());
+    send(client.events());
+    send(client.rotate());
+    send(client.remove_device([0; 16]));
+    send(client.reset_recovery());
+    send(client.delete_group());
+    send(client.named_record_id("pref:theme"));
+    send(client.invite_with_qr());
+    send(client.invite_with_code());
+    send(client.invite_scanned(""));
+    send(client.accept(invitation, attempt));
+    send(client.decline(invitation));
+    send(invitation.wait_for_request());
+    send(SyncClient::create_group(reqwest::Client::new(), ""));
+    send(SyncClient::recover(reqwest::Client::new(), "", ""));
+    send(Joining::show_qr_code(reqwest::Client::new(), ""));
+    send(Joining::with_code(reqwest::Client::new(), "", ""));
+    let mut joining = joining;
+    send(joining.request());
+    send(joining.finish());
+}
