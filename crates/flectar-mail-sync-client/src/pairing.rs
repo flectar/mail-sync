@@ -105,7 +105,7 @@ impl Slot {
         uri.into()
     }
 
-    fn from_uri(http: &Http, uri: &str) -> Result<Self> {
+    fn from_uri(client: &reqwest::Client, uri: &str) -> Result<Self> {
         let uri = Url::parse(uri.trim()).map_err(|_| Error::NotAPairingCode)?;
         if uri.scheme() != QR_SCHEME || uri.path() != "pair" {
             return Err(Error::NotAPairingCode);
@@ -121,7 +121,7 @@ impl Slot {
         }
         let bytes = |name: &str| Bytes::decode(&field(name)?).ok_or(Error::NotAPairingCode);
         Ok(Self {
-            http: http.with_server(&field("server")?),
+            http: Http::new(client.clone(), &field("server")?),
             slot_id: bytes("slot")?.to_array().ok_or(Error::NotAPairingCode)?,
             channel: Channel::Sealed(PairingSecret::from_bytes(
                 bytes("secret")?.to_array().ok_or(Error::NotAPairingCode)?,
@@ -232,7 +232,7 @@ impl SyncClient {
 
     /// Answer the QR code a new device shows.
     pub async fn invite_scanned(&self, qr_code: &str) -> Result<Invitation> {
-        self.invite_into(Slot::from_uri(&self.http, qr_code)?, None)
+        self.invite_into(Slot::from_uri(self.http.client(), qr_code)?, None)
             .await
     }
 
@@ -295,9 +295,8 @@ impl Joining {
 
     /// The QR code of an existing device was scanned.
     pub fn scanned(http: reqwest::Client, qr_code: &str) -> Result<Self> {
-        let api = Http::new(http.clone(), "https://invalid.invalid");
         Ok(Self {
-            slot: Slot::from_uri(&api, qr_code)?,
+            slot: Slot::from_uri(&http, qr_code)?,
             http,
             invite: None,
             identity: None,

@@ -52,9 +52,8 @@ impl Http {
         &self.base
     }
 
-    /// The same HTTP client, for another server.
-    pub fn with_server(&self, server_url: &str) -> Self {
-        Self::new(self.client.clone(), server_url)
+    pub(crate) fn client(&self) -> &reqwest::Client {
+        &self.client
     }
 
     fn get(&self, path: &str) -> RequestBuilder {
