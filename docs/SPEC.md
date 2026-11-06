@@ -84,6 +84,7 @@ Each derivation and signature is bound to one purpose by an ASCII label:
 | `RECORD_KEY` | `flectar-mail-sync/v1 record-key` |
 | `TAG_KEY` | `flectar-mail-sync/v1 tag-key` |
 | `RECORD_AAD` | `flectar-mail-sync/v1 record` |
+| `RECORD_ID` | `flectar-mail-sync/v1 record-id` |
 | `ROOT_COMMIT` | `flectar-mail-sync/v1 root-commit` |
 | `PREVIOUS_ROOT` | `flectar-mail-sync/v1 previous-root` |
 | `WRAP` | `flectar-mail-sync/v1 wrap` |
@@ -160,6 +161,13 @@ epoch, so a server cannot move it elsewhere.
 
 `tag = HMAC-SHA256(tag key, UTF-8 collection name)[0..16]`. The server sees
 only the tag.
+
+Items known by name, such as preference keys, get record ids the same way,
+so every device finds the same record without the server learning the name:
+`record_id = HMAC-SHA256(HKDF(K_1, RECORD_ID), UTF-8 name)[0..16]`, where
+`RECORD_ID` is `flectar-mail-sync/v1 record-id`. Only epoch 1's root key is
+used, so ids survive rotations; every member can derive `K_1` (§4.4). Other
+records use random ids.
 
 ### 4.7 Login message
 

@@ -571,6 +571,17 @@ impl SyncClient {
         chain.root(&group_id, epoch)
     }
 
+    /// The record id of an item known by name, such as a preference key:
+    /// the same on every device of the group, and meaningless to the server
+    /// (SPEC §4.6).
+    pub async fn named_record_id(&self, name: &str) -> Result<[u8; 16]> {
+        let first = self.root_key(1).await?;
+        Ok(flectar_mail_sync_crypto::collection_tag(
+            &first.record_id_key(),
+            name,
+        ))
+    }
+
     /// The current epoch and its root key.
     pub(crate) async fn current_root(&self) -> Result<(u64, RootKey)> {
         let epoch = self.chain.lock().await.state.epoch;

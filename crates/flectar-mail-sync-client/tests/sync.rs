@@ -460,3 +460,34 @@ async fn random_edits_on_three_devices_converge() {
         }
     }
 }
+
+#[tokio::test]
+async fn named_records_get_the_same_id_on_every_device_and_after_rotation() {
+    let server = Server::start().await;
+    let (laptop, _) = start_group(&server).await;
+    let phone = join_by_qr(&laptop).await;
+    let id = laptop.client.named_record_id("pref:theme").await.unwrap();
+    assert_eq!(
+        id,
+        phone.client.named_record_id("pref:theme").await.unwrap()
+    );
+    assert_ne!(
+        id,
+        laptop
+            .client
+            .named_record_id("pref:language")
+            .await
+            .unwrap()
+    );
+    laptop.client.rotate().await.unwrap();
+    assert_eq!(
+        id,
+        laptop.client.named_record_id("pref:theme").await.unwrap()
+    );
+    // A device that joins after the rotation derives the same id.
+    let tablet = join_by_qr(&laptop).await;
+    assert_eq!(
+        id,
+        tablet.client.named_record_id("pref:theme").await.unwrap()
+    );
+}

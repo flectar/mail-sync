@@ -44,6 +44,7 @@ pub mod label {
     pub const RECOVERY_KEM: &[u8] = b"flectar-mail-sync/v1 recovery-kem";
     pub const RECORD_KEY: &[u8] = b"flectar-mail-sync/v1 record-key";
     pub const TAG_KEY: &[u8] = b"flectar-mail-sync/v1 tag-key";
+    pub const RECORD_ID: &[u8] = b"flectar-mail-sync/v1 record-id";
     pub const RECORD_AAD: &[u8] = b"flectar-mail-sync/v1 record";
     pub const AUTH: &[u8] = b"flectar-mail-sync/v1 auth";
     pub const OP_SIGNATURE: &[u8] = b"flectar-mail-sync/v1 op";

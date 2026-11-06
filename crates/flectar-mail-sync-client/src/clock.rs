@@ -65,6 +65,16 @@ impl Clock {
         }
     }
 
+    /// The latest stamp issued or seen, to store as the next start's floor.
+    pub fn floor(&self) -> Stamp {
+        let (ms, counter) = *self.last.lock().unwrap_or_else(PoisonError::into_inner);
+        Stamp {
+            ms,
+            counter,
+            device: self.device,
+        }
+    }
+
     /// Move past a stamp seen in a received record.
     pub fn observe(&self, stamp: &Stamp) {
         let mut last = self.last.lock().unwrap_or_else(PoisonError::into_inner);
@@ -99,6 +109,15 @@ mod tests {
         let next = clock.now_at(1_000);
         assert!(next > remote);
         assert_eq!((next.ms, next.counter), (9_000, 5));
+    }
+
+    #[test]
+    fn the_floor_is_the_latest_stamp() {
+        let clock = Clock::new([1; 16], None);
+        let stamp = clock.now_at(7_000);
+        assert_eq!(clock.floor(), stamp);
+        let restarted = Clock::new([1; 16], Some(clock.floor()));
+        assert!(restarted.now_at(1) > stamp);
     }
 
     #[test]

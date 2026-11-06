@@ -45,6 +45,13 @@ impl RootKey {
         hkdf_sha256(&self.0, &[label::TAG_KEY, &epoch.to_be_bytes()])
     }
 
+    /// Key for naming records after items known by name, such as a
+    /// preference key. Only epoch 1's root key is used for it, so a name
+    /// keeps its record id across key rotations.
+    pub fn record_id_key(&self) -> [u8; 32] {
+        hkdf_sha256(&self.0, &[label::RECORD_ID])
+    }
+
     /// Public commitment to this key as the root key of `epoch`. Signed
     /// operations carry it, so a device can check that a key it unwraps is
     /// the one a member chose and not one the server substituted.
