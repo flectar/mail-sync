@@ -70,6 +70,8 @@ pub fn app(state: AppState) -> Router {
         .route("/v1/groups/{group}/commit", post(api::commit))
         .route("/v1/groups/{group}/changes", get(api::changes))
         .route("/v1/groups/{group}/events", get(api::events))
+        .route("/v1/groups/{group}/ops", get(api::ops).post(api::append_op))
+        .route("/v1/groups/{group}/wrap", get(api::wrap))
         .route("/healthz", get(api::healthz))
         .layer(DefaultBodyLimit::max(body_limit))
         // Limits the time until response headers; event streams are not cut.

@@ -6,7 +6,7 @@
 
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use flectar_mail_sync_crypto::random_bytes;
+use flectar_mail_sync_crypto::{RECOVERY_ID, random_bytes};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::sync::{Mutex, PoisonError};
@@ -15,10 +15,18 @@ use std::sync::{Mutex, PoisonError};
 /// until old challenges expire.
 const MAX_PENDING_CHALLENGES: usize = 100_000;
 
+/// Who a session acts for: a device, or the recovery key when `device_id`
+/// is [`RECOVERY_ID`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Principal {
     pub group_id: [u8; 16],
     pub device_id: [u8; 16],
+}
+
+impl Principal {
+    pub fn is_recovery(&self) -> bool {
+        self.device_id == RECOVERY_ID
+    }
 }
 
 #[derive(Clone, Copy, Debug)]

@@ -128,6 +128,17 @@ pub struct Limits {
     pub max_group_bytes: u64,
     /// Most records returned by one `changes` page.
     pub max_page_records: u32,
+    /// Most devices in one group.
+    pub max_devices: u32,
+}
+
+/// A root key wrapped for one device, or for the recovery key when `target`
+/// is all zeros (SPEC §4.8).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Wrap {
+    pub target: Bytes,
+    pub ciphertext: Bytes,
 }
 
 /// `POST /v1/groups`: create a group from its signed genesis operation.
@@ -138,6 +149,54 @@ pub struct CreateGroup {
     pub op: Bytes,
     /// Signatures over the operation: the recovery key's, then the device's.
     pub signatures: Vec<Bytes>,
+    /// Epoch 1 wraps: the recovery key's (required) and the device's
+    /// (optional).
+    pub wraps: Vec<Wrap>,
+}
+
+/// One operation of a group's chain.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SignedOp {
+    pub index: u64,
+    pub op: Bytes,
+    pub signatures: Vec<Bytes>,
+}
+
+/// `GET /v1/groups/{group}/ops?since=N`: operations with `index >= since`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpsPage {
+    pub ops: Vec<SignedOp>,
+    pub more: bool,
+}
+
+/// `POST /v1/groups/{group}/ops`: append the next operation, with the wraps
+/// it requires (SPEC §6.10).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppendOp {
+    pub op: Bytes,
+    pub signatures: Vec<Bytes>,
+    #[serde(default)]
+    pub wraps: Vec<Wrap>,
+}
+
+/// The chain after an append.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Appended {
+    pub head_index: u64,
+    pub epoch: u64,
+}
+
+/// `GET /v1/groups/{group}/wrap`: the current epoch's wrap for the session's
+/// device, or for the recovery key in a recovery session.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CurrentWrap {
+    pub epoch: u64,
+    pub ciphertext: Bytes,
 }
 
 /// Response to [`CreateGroup`].
@@ -148,12 +207,17 @@ pub struct GroupCreated {
     pub high_seq: u64,
 }
 
-/// `POST /v1/auth/challenge`.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// `POST /v1/auth/challenge`. A device names its group and its id. Recovery
+/// names only its public key, and the server finds the group (SPEC §6.4).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChallengeRequest {
-    pub group_id: Bytes,
-    pub device_id: Bytes,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group_id: Option<Bytes>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_id: Option<Bytes>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery_public_key: Option<Bytes>,
 }
 
 /// A one-time login challenge.
@@ -181,6 +245,8 @@ pub struct Session {
     pub token: String,
     /// Milliseconds since the Unix epoch.
     pub expires_at: i64,
+    /// The session's group. A recovery login learns it here.
+    pub group_id: Bytes,
 }
 
 /// One change in a commit: either a new ciphertext for the record or its
@@ -359,6 +425,8 @@ pub enum ErrorCode {
     /// The requested `since` is older than the group's tombstone horizon:
     /// read the whole group again with `since=0`.
     Gone,
+    /// The group was deleted.
+    GroupDeleted,
     PayloadTooLarge,
     QuotaExceeded,
     RateLimited,

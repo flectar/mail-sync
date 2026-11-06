@@ -1,215 +1,22 @@
 #![allow(clippy::unwrap_used)]
 
-//! End-to-end tests of the HTTP API, acting as a device would: build and
-//! sign a genesis operation, log in by challenge, seal records, commit and
-//! read them back.
+//! End-to-end tests of records: sealing, committing and reading back,
+//! conflicts, deletions, limits, logins and live events.
 
-use axum::Router;
+mod common;
+
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode, header};
-use flectar_mail_sync_crypto::{
-    DeviceKeys, DeviceSigningKey, Genesis, Op, OpKind, RecoveryCode, RootKey, collection_tag,
-    open_record, seal_record, sign_auth, sign_op,
+use common::{
+    AUDIENCE, Device, Harness, Recovery, create_group, delete, genesis_request, login, put,
 };
+use flectar_mail_sync_crypto::{DeviceSigningKey, RootKey, open_record, sign_auth};
 use flectar_mail_sync_proto::Bytes;
-use flectar_mail_sync_server::{AppState, Config, State, Store, app, serve};
+use flectar_mail_sync_server::serve;
 use http_body_util::BodyExt;
-use serde_json::{Value, json};
+use serde_json::json;
 use std::time::Duration;
 use tower::ServiceExt;
-
-const AUDIENCE: &str = "https://sync.test";
-
-struct Harness {
-    _dir: tempfile::TempDir,
-    state: AppState,
-    router: Router,
-}
-
-impl Harness {
-    fn new() -> Self {
-        Self::with_config(|_| {})
-    }
-
-    fn with_config(adjust: impl FnOnce(&mut Config)) -> Self {
-        let dir = tempfile::tempdir().unwrap();
-        let store = Store::open(dir.path().join("sync.db"), 2).unwrap();
-        let mut config = Config::new(AUDIENCE);
-        adjust(&mut config);
-        let state = State::new(config, store);
-        let router = app(state.clone());
-        Self {
-            _dir: dir,
-            state,
-            router,
-        }
-    }
-
-    async fn call(
-        &self,
-        method: Method,
-        uri: &str,
-        token: Option<&str>,
-        body: Option<Value>,
-    ) -> (StatusCode, Value) {
-        let mut request = Request::builder().method(method).uri(uri);
-        if let Some(token) = token {
-            request = request.header(header::AUTHORIZATION, format!("Bearer {token}"));
-        }
-        let request = match body {
-            Some(body) => request
-                .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(body.to_string()))
-                .unwrap(),
-            None => request.body(Body::empty()).unwrap(),
-        };
-        let response = self.router.clone().oneshot(request).await.unwrap();
-        let status = response.status();
-        let bytes = response.into_body().collect().await.unwrap().to_bytes();
-        let value = if bytes.is_empty() {
-            Value::Null
-        } else {
-            serde_json::from_slice(&bytes)
-                .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(&bytes).into()))
-        };
-        (status, value)
-    }
-}
-
-struct Device {
-    group_id: [u8; 16],
-    device_id: [u8; 16],
-    key: DeviceSigningKey,
-    root: RootKey,
-}
-
-impl Device {
-    fn group(&self) -> String {
-        Bytes::from(self.group_id).encode()
-    }
-}
-
-fn genesis_request(
-    group_id: [u8; 16],
-    device_id: [u8; 16],
-    device: &DeviceSigningKey,
-    recovery: &RecoveryCode,
-) -> Value {
-    let recovery_key = recovery.signing_key();
-    let op = Op {
-        group_id,
-        index: 0,
-        prev_hash: [0; 32],
-        created_at_ms: 1_762_400_000_000,
-        kind: OpKind::Genesis(Genesis {
-            recovery_sign_public_key: recovery_key.public_key().to_bytes(),
-            recovery_kem_public_key: vec![1; 32],
-            device: DeviceKeys {
-                device_id,
-                sign_public_key: device.public_key().to_bytes(),
-                kem_public_key: vec![2; 32],
-                name: "Test laptop".into(),
-            },
-        }),
-    };
-    let bytes = op.encode().unwrap();
-    json!({
-        "op": Bytes(bytes.clone()).encode(),
-        "signatures": [
-            Bytes::from(sign_op(&recovery_key, &bytes)).encode(),
-            Bytes::from(sign_op(device, &bytes)).encode(),
-        ],
-    })
-}
-
-async fn create_group(h: &Harness) -> Device {
-    let group_id = flectar_mail_sync_crypto::random_bytes().unwrap();
-    let device_id = flectar_mail_sync_crypto::random_bytes().unwrap();
-    let key = DeviceSigningKey::generate().unwrap();
-    let recovery = RecoveryCode::generate().unwrap();
-    let (status, body) = h
-        .call(
-            Method::POST,
-            "/v1/groups",
-            None,
-            Some(genesis_request(group_id, device_id, &key, &recovery)),
-        )
-        .await;
-    assert_eq!(status, StatusCode::CREATED, "{body}");
-    assert_eq!(body["groupId"], Bytes::from(group_id).encode());
-    Device {
-        group_id,
-        device_id,
-        key,
-        root: RootKey::generate().unwrap(),
-    }
-}
-
-async fn login(h: &Harness, device: &Device) -> String {
-    let (status, challenge) = h
-        .call(
-            Method::POST,
-            "/v1/auth/challenge",
-            None,
-            Some(json!({
-                "groupId": Bytes::from(device.group_id).encode(),
-                "deviceId": Bytes::from(device.device_id).encode(),
-            })),
-        )
-        .await;
-    assert_eq!(status, StatusCode::OK, "{challenge}");
-    let nonce: [u8; 32] = Bytes::decode(challenge["nonce"].as_str().unwrap())
-        .unwrap()
-        .to_array()
-        .unwrap();
-    let signature = sign_auth(
-        &device.key,
-        AUDIENCE,
-        &device.group_id,
-        &device.device_id,
-        &nonce,
-    )
-    .unwrap();
-    let (status, session) = h
-        .call(
-            Method::POST,
-            "/v1/auth/session",
-            None,
-            Some(json!({
-                "challengeId": challenge["challengeId"],
-                "signature": Bytes::from(signature).encode(),
-            })),
-        )
-        .await;
-    assert_eq!(status, StatusCode::OK, "{session}");
-    session["token"].as_str().unwrap().to_owned()
-}
-
-/// A sealed `put` commit item for `record_id`.
-fn put(device: &Device, record_id: [u8; 16], expected_seq: u64, body: &[u8]) -> Value {
-    let tag = collection_tag(&device.root.tag_key(1), "pref");
-    let (nonce, ciphertext) = seal_record(
-        &device.root.record_key(1),
-        &device.group_id,
-        &record_id,
-        &tag,
-        1,
-        body,
-    )
-    .unwrap();
-    json!({
-        "recordId": Bytes::from(record_id).encode(),
-        "expectedSeq": expected_seq,
-        "tag": Bytes::from(tag).encode(),
-        "epoch": 1,
-        "nonce": Bytes::from(nonce).encode(),
-        "ciphertext": Bytes(ciphertext).encode(),
-    })
-}
-
-fn delete(record_id: [u8; 16], expected_seq: u64) -> Value {
-    json!({"recordId": Bytes::from(record_id).encode(), "expectedSeq": expected_seq, "deleted": true})
-}
 
 #[tokio::test]
 async fn info_reports_protocol_and_limits() {
@@ -225,7 +32,7 @@ async fn info_reports_protocol_and_limits() {
 #[tokio::test]
 async fn a_device_seals_commits_and_reads_back_its_records() {
     let h = Harness::new();
-    let device = create_group(&h).await;
+    let (device, _) = create_group(&h).await;
     let token = login(&h, &device).await;
     let uri = format!("/v1/groups/{}/commit", device.group());
     let (status, committed) = h
@@ -279,7 +86,7 @@ async fn a_device_seals_commits_and_reads_back_its_records() {
 #[tokio::test]
 async fn stale_writers_get_conflicts_and_nothing_is_applied() {
     let h = Harness::new();
-    let device = create_group(&h).await;
+    let (device, _) = create_group(&h).await;
     let token = login(&h, &device).await;
     let uri = format!("/v1/groups/{}/commit", device.group());
     h.call(
@@ -319,7 +126,7 @@ async fn stale_writers_get_conflicts_and_nothing_is_applied() {
 #[tokio::test]
 async fn deletions_leave_tombstones_and_records_can_return() {
     let h = Harness::new();
-    let device = create_group(&h).await;
+    let (device, _) = create_group(&h).await;
     let token = login(&h, &device).await;
     let uri = format!("/v1/groups/{}/commit", device.group());
     h.call(
@@ -364,7 +171,7 @@ async fn deletions_leave_tombstones_and_records_can_return() {
 #[tokio::test]
 async fn cursors_behind_purged_tombstones_must_read_again() {
     let h = Harness::new();
-    let device = create_group(&h).await;
+    let (device, _) = create_group(&h).await;
     let token = login(&h, &device).await;
     let uri = format!("/v1/groups/{}/commit", device.group());
     h.call(
@@ -394,8 +201,8 @@ async fn cursors_behind_purged_tombstones_must_read_again() {
 #[tokio::test]
 async fn sessions_are_required_and_scoped_to_their_group() {
     let h = Harness::new();
-    let alice = create_group(&h).await;
-    let bob = create_group(&h).await;
+    let (alice, _) = create_group(&h).await;
+    let (bob, _) = create_group(&h).await;
     let alice_token = login(&h, &alice).await;
     let commit = json!({"items": [put(&bob, [1; 16], 0, b"x")]});
     let (status, _) = h
@@ -430,7 +237,7 @@ async fn sessions_are_required_and_scoped_to_their_group() {
 #[tokio::test]
 async fn logins_need_the_device_key_and_a_fresh_challenge() {
     let h = Harness::new();
-    let device = create_group(&h).await;
+    let (device, _) = create_group(&h).await;
     let request = json!({
         "groupId": Bytes::from(device.group_id).encode(),
         "deviceId": Bytes::from(device.device_id).encode(),
@@ -515,16 +322,32 @@ async fn logins_need_the_device_key_and_a_fresh_challenge() {
 #[tokio::test]
 async fn genesis_operations_are_verified() {
     let h = Harness::new();
-    let key = DeviceSigningKey::generate().unwrap();
-    let recovery = RecoveryCode::generate().unwrap();
-    let mut request = genesis_request([5; 16], [6; 16], &key, &recovery);
-    request["signatures"] = json!([request["signatures"][1], request["signatures"][0]]);
+    let recovery = Recovery::new();
+    let device = Device::new(
+        flectar_mail_sync_crypto::random_bytes().unwrap(),
+        RootKey::generate().unwrap(),
+        1,
+    );
+
+    let mut swapped = genesis_request(&device, &recovery);
+    swapped["signatures"] = json!([swapped["signatures"][1], swapped["signatures"][0]]);
     let (status, body) = h
-        .call(Method::POST, "/v1/groups", None, Some(request))
+        .call(Method::POST, "/v1/groups", None, Some(swapped))
         .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
 
-    let request = genesis_request([5; 16], [6; 16], &key, &recovery);
+    let mut unwrapped = genesis_request(&device, &recovery);
+    unwrapped["wraps"] = json!([]);
+    let (status, body) = h
+        .call(Method::POST, "/v1/groups", None, Some(unwrapped))
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "the recovery wrap is required: {body}"
+    );
+
+    let request = genesis_request(&device, &recovery);
     let (status, _) = h
         .call(Method::POST, "/v1/groups", None, Some(request.clone()))
         .await;
@@ -542,7 +365,7 @@ async fn limits_are_enforced() {
         config.limits.max_group_bytes = 700;
         config.limits.max_batch_records = 2;
     });
-    let device = create_group(&h).await;
+    let (device, _) = create_group(&h).await;
     let token = login(&h, &device).await;
     let uri = format!("/v1/groups/{}/commit", device.group());
     let big = vec![0u8; 400];
@@ -595,7 +418,7 @@ async fn limits_are_enforced() {
 #[tokio::test]
 async fn event_streams_announce_new_sequence_numbers() {
     let h = Harness::new();
-    let device = create_group(&h).await;
+    let (device, _) = create_group(&h).await;
     let token = login(&h, &device).await;
     let request = Request::builder()
         .uri(format!("/v1/groups/{}/events", device.group()))
@@ -632,7 +455,7 @@ async fn event_streams_announce_new_sequence_numbers() {
 async fn shutdown_finishes_while_event_streams_are_open() {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let h = Harness::new();
-    let device = create_group(&h).await;
+    let (device, _) = create_group(&h).await;
     let token = login(&h, &device).await;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();

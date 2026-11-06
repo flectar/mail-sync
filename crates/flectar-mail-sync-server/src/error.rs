@@ -10,13 +10,17 @@ use flectar_mail_sync_proto::{Bytes, Conflict, ErrorBody, ErrorCode, ErrorDetail
 pub enum ApiError {
     BadRequest(String),
     Unauthorized,
-    Forbidden,
+    Forbidden(&'static str),
     NotFound,
+    GroupDeleted,
     GroupExists,
+    RecoveryKeyTaken,
+    ChainMoved,
     Conflicts(Vec<([u8; 16], u64)>),
     Gone,
     PayloadTooLarge(String),
     QuotaExceeded,
+    DeviceLimit,
     RateLimited,
     Internal,
 }
@@ -31,9 +35,14 @@ impl From<StoreError> for ApiError {
     fn from(error: StoreError) -> Self {
         match error {
             StoreError::NotFound => Self::NotFound,
+            StoreError::Deleted => Self::GroupDeleted,
             StoreError::GroupExists => Self::GroupExists,
+            StoreError::ChainMoved => Self::ChainMoved,
+            StoreError::InvalidOp(message) => Self::BadRequest(message),
             StoreError::Gone => Self::Gone,
             StoreError::QuotaExceeded => Self::QuotaExceeded,
+            StoreError::DeviceLimit => Self::DeviceLimit,
+            StoreError::RecoveryKeyTaken => Self::RecoveryKeyTaken,
             StoreError::Invalid(message) => Self::BadRequest(message.into()),
             StoreError::Sqlite(_) | StoreError::Task(_) => {
                 tracing::error!(%error, "storage failure");
@@ -58,10 +67,10 @@ impl IntoResponse for ApiError {
                 "a valid session is required".into(),
                 vec![],
             ),
-            Self::Forbidden => (
+            Self::Forbidden(message) => (
                 StatusCode::FORBIDDEN,
                 ErrorCode::Forbidden,
-                "the session does not belong to this group".into(),
+                message.into(),
                 vec![],
             ),
             Self::NotFound => (
@@ -70,10 +79,28 @@ impl IntoResponse for ApiError {
                 "not found".into(),
                 vec![],
             ),
+            Self::GroupDeleted => (
+                StatusCode::GONE,
+                ErrorCode::GroupDeleted,
+                "the group was deleted".into(),
+                vec![],
+            ),
+            Self::ChainMoved => (
+                StatusCode::CONFLICT,
+                ErrorCode::Conflict,
+                "the chain has a newer head; read it again and rebuild the operation".into(),
+                vec![],
+            ),
             Self::GroupExists => (
                 StatusCode::CONFLICT,
                 ErrorCode::Conflict,
                 "the group already exists".into(),
+                vec![],
+            ),
+            Self::RecoveryKeyTaken => (
+                StatusCode::CONFLICT,
+                ErrorCode::Conflict,
+                "the recovery key belongs to another group".into(),
                 vec![],
             ),
             Self::Conflicts(stale) => (
@@ -104,6 +131,12 @@ impl IntoResponse for ApiError {
                 StatusCode::INSUFFICIENT_STORAGE,
                 ErrorCode::QuotaExceeded,
                 "the group would exceed its storage quota".into(),
+                vec![],
+            ),
+            Self::DeviceLimit => (
+                StatusCode::INSUFFICIENT_STORAGE,
+                ErrorCode::QuotaExceeded,
+                "the group has reached its device limit".into(),
                 vec![],
             ),
             Self::RateLimited => (

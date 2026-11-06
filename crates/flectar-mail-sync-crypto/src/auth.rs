@@ -3,7 +3,9 @@ use crate::{Error, Result, label};
 
 /// The bytes a device signs to answer a login challenge. Binding the
 /// server's public URL (`audience`) keeps a signature for one server from
-/// being replayed against another.
+/// being replayed against another. A recovery login passes
+/// [`crate::RECOVERY_ID`] as both ids: it learns its group only once logged
+/// in.
 pub fn auth_message(
     audience: &str,
     group_id: &[u8; 16],

@@ -1,21 +1,36 @@
 //! Cryptography of Flectar Mail Sync, shared by the app and the server.
 //!
-//! The server uses only the parts that verify: operation signatures, login
-//! signatures and operation hashes. Everything that encrypts or decrypts runs
-//! on devices. `docs/SPEC.md` §4 describes the key schedule and formats.
+//! The server uses only the parts that verify: the membership chain
+//! ([`GroupState`]), login signatures and operation hashes. Everything that
+//! encrypts or decrypts runs on devices; key wrapping is behind the `kem`
+//! feature, which the server does not enable. `docs/SPEC.md` §4 and §5
+//! describe the formats.
 
 mod auth;
+mod chain;
+#[cfg(feature = "kem")]
+mod kem;
 mod keys;
 mod op;
+mod pairing;
 mod record;
 mod recovery;
 
 pub use auth::{auth_message, sign_auth, verify_auth};
+pub use chain::{GroupState, Member};
+#[cfg(feature = "kem")]
+pub use kem::{
+    KEM_PUBLIC_KEY_BYTES, KemSecretKey, WRAP_SUITE_XWING_HKDFSHA256_CHACHA20POLY1305,
+    unwrap_root_key, wrap_root_key,
+};
 pub use keys::{DeviceSigningKey, RootKey, SignPublicKey, hkdf_sha256};
 pub use op::{
-    DeviceKeys, Genesis, MAX_DEVICE_NAME_BYTES, MAX_KEM_PUBLIC_KEY_BYTES, Op, OpKind, op_hash,
-    sign_op, verify_op,
+    AddDevice, Authorizer, DeleteGroup, DeviceKeys, Genesis, MAX_KEM_PUBLIC_KEY_BYTES,
+    MAX_SEALED_ROOT_BYTES, MAX_URL_BYTES, MoveServer, Op, OpKind, RECOVERY_ID, RemoveDevice,
+    ResetRecovery, Rotate, device_binding_message, op_hash, recovery_binding_message, sign_op,
+    verify_op,
 };
+pub use pairing::{Direction, PairingSecret, approval_words};
 pub use record::{collection_tag, open_record, pad, seal_record, unpad};
 pub use recovery::RecoveryCode;
 
@@ -30,6 +45,13 @@ pub mod label {
     pub const AUTH: &[u8] = b"flectar-mail-sync/v1 auth";
     pub const OP_SIGNATURE: &[u8] = b"flectar-mail-sync/v1 op";
     pub const OP_HASH: &[u8] = b"flectar-mail-sync/v1 op-hash";
+    pub const DEVICE_BINDING: &[u8] = b"flectar-mail-sync/v1 device-binding";
+    pub const RECOVERY_BINDING: &[u8] = b"flectar-mail-sync/v1 recovery-binding";
+    pub const ROOT_COMMIT: &[u8] = b"flectar-mail-sync/v1 root-commit";
+    pub const PREVIOUS_ROOT: &[u8] = b"flectar-mail-sync/v1 previous-root";
+    pub const WRAP: &[u8] = b"flectar-mail-sync/v1 wrap";
+    pub const PAIRING: &[u8] = b"flectar-mail-sync/v1 pairing";
+    pub const FINGERPRINT: &[u8] = b"flectar-mail-sync/v1 fingerprint";
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]

@@ -2,7 +2,7 @@
 
 use crate::error::ApiError;
 use crate::sessions::{Principal, SessionError};
-use crate::store::{CommitOutcome, NewGroup, Payload, PendingChange};
+use crate::store::{CommitOutcome, NewGroup, Payload, PendingChange, WrapIn};
 use crate::{AppState, now_ms};
 use axum::Json;
 use axum::extract::rejection::JsonRejection;
@@ -11,11 +11,11 @@ use axum::http::StatusCode;
 use axum::http::request::Parts;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
-use flectar_mail_sync_crypto::{Op, OpKind, SignPublicKey, op_hash, verify_auth};
+use flectar_mail_sync_crypto::{Op, OpKind, RECOVERY_ID, SignPublicKey, random_bytes, verify_auth};
 use flectar_mail_sync_proto::{
-    Bytes, Challenge, ChallengeRequest, Change, Changes, CommitRequest, CommitResponse, Committed,
-    CreateGroup, GroupCreated, Info, ItemError, PROTOCOL_VERSION, Record, SeqEvent, Session,
-    SessionRequest, len,
+    AppendOp, Appended, Bytes, Challenge, ChallengeRequest, Change, Changes, CommitRequest,
+    CommitResponse, Committed, CreateGroup, CurrentWrap, GroupCreated, Info, ItemError, OpsPage,
+    PROTOCOL_VERSION, Record, SeqEvent, Session, SessionRequest, SignedOp, Wrap, len,
 };
 use serde::Deserialize;
 use std::collections::HashSet;
@@ -72,15 +72,48 @@ impl FromRequestParts<AppState> for Authed {
     }
 }
 
+const RECOVERY_ONLY: &str =
+    "a recovery session may only read the chain and its wrap, and add a device";
+
 impl Authed {
-    /// The session's group, if it is the one named in the path.
+    /// The session's group, if it is the one named in the path. Recovery
+    /// sessions may use it too.
     fn group(&self, path_group: &str) -> Result<[u8; 16], ApiError> {
         let group_id = group_from_path(path_group)?;
         if group_id != self.0.group_id {
-            return Err(ApiError::Forbidden);
+            return Err(ApiError::Forbidden("the session belongs to another group"));
         }
         Ok(group_id)
     }
+
+    /// Like [`Authed::group`], but only for a device session: recovery
+    /// sessions may read the chain and the recovery wrap, and add a device,
+    /// nothing else.
+    fn device_group(&self, path_group: &str) -> Result<[u8; 16], ApiError> {
+        if self.0.is_recovery() {
+            return Err(ApiError::Forbidden(RECOVERY_ONLY));
+        }
+        self.group(path_group)
+    }
+}
+
+fn signatures(values: &[Bytes]) -> Result<Vec<[u8; 64]>, ApiError> {
+    values
+        .iter()
+        .map(|signature| fixed::<{ len::SIGNATURE }>(signature, "signature"))
+        .collect()
+}
+
+fn wraps(values: Vec<Wrap>) -> Result<Vec<WrapIn>, ApiError> {
+    values
+        .into_iter()
+        .map(|wrap| {
+            Ok(WrapIn {
+                target: fixed::<16>(&wrap.target, "wrap target")?,
+                ciphertext: wrap.ciphertext.0,
+            })
+        })
+        .collect()
 }
 
 pub async fn info(State(state): State<AppState>) -> Json<Info> {
@@ -108,21 +141,13 @@ pub async fn create_group(
     payload: Result<Json<CreateGroup>, JsonRejection>,
 ) -> Result<(StatusCode, Json<GroupCreated>), ApiError> {
     let request = body(payload)?;
-    let signatures: Vec<&[u8]> = request.signatures.iter().map(Bytes::as_slice).collect();
-    let op = Op::verify_genesis(request.op.as_slice(), &signatures)
-        .map_err(|error| ApiError::bad_request(format!("invalid genesis operation: {error}")))?;
-    let OpKind::Genesis(genesis) = &op.kind;
-    state
+    let group = state
         .store
         .create_group(
             NewGroup {
-                group_id: op.group_id,
-                op_hash: op_hash(request.op.as_slice()),
-                op: request.op.0.clone(),
-                signatures: signatures.concat(),
-                recovery_sign_public_key: genesis.recovery_sign_public_key,
-                device_id: genesis.device.device_id,
-                device_sign_public_key: genesis.device.sign_public_key,
+                signatures: signatures(&request.signatures)?,
+                wraps: wraps(request.wraps)?,
+                op: request.op.0,
             },
             now_ms(),
         )
@@ -131,7 +156,7 @@ pub async fn create_group(
     Ok((
         StatusCode::CREATED,
         Json(GroupCreated {
-            group_id: Bytes::from(op.group_id),
+            group_id: Bytes::from(group.group_id),
             high_seq: 0,
         }),
     ))
@@ -142,9 +167,42 @@ pub async fn challenge(
     payload: Result<Json<ChallengeRequest>, JsonRejection>,
 ) -> Result<Json<Challenge>, ApiError> {
     let request = body(payload)?;
-    let principal = Principal {
-        group_id: fixed::<{ len::GROUP_ID }>(&request.group_id, "groupId")?,
-        device_id: fixed::<{ len::DEVICE_ID }>(&request.device_id, "deviceId")?,
+    let principal = match (
+        &request.group_id,
+        &request.device_id,
+        &request.recovery_public_key,
+    ) {
+        (Some(group_id), Some(device_id), None) => {
+            let device_id = fixed::<{ len::DEVICE_ID }>(device_id, "deviceId")?;
+            if device_id == RECOVERY_ID {
+                return Err(ApiError::bad_request(
+                    "this device id is reserved; recovery logs in with recoveryPublicKey",
+                ));
+            }
+            Principal {
+                group_id: fixed::<{ len::GROUP_ID }>(group_id, "groupId")?,
+                device_id,
+            }
+        }
+        (None, None, Some(key)) => {
+            let key = fixed::<{ len::SIGN_PUBLIC_KEY }>(key, "recoveryPublicKey")?;
+            // An unknown key gets a challenge for a group that does not
+            // exist, which no signature can answer, so the endpoint does not
+            // reveal which keys are in use.
+            let group_id = match state.store.group_by_recovery_key(key).await? {
+                Some(group_id) => group_id,
+                None => random_bytes().map_err(|_| ApiError::Internal)?,
+            };
+            Principal {
+                group_id,
+                device_id: RECOVERY_ID,
+            }
+        }
+        _ => {
+            return Err(ApiError::bad_request(
+                "send groupId and deviceId, or only recoveryPublicKey",
+            ));
+        }
     };
     let (id, pending) = state
         .sessions
@@ -172,16 +230,28 @@ pub async fn session(
         .take_challenge(&id, now)
         .ok_or(ApiError::Unauthorized)?;
     let principal = pending.principal;
-    let key = state
-        .store
-        .device_key(principal.group_id, principal.device_id)
-        .await?
-        .ok_or(ApiError::Unauthorized)?;
-    let key = SignPublicKey::from_bytes(&key).map_err(|_| ApiError::Internal)?;
+    // Recovery does not know its group before logging in, so its login
+    // message names RECOVERY_ID as the group too (SPEC §4.7).
+    let (key, signed_group) = if principal.is_recovery() {
+        (
+            state.store.recovery_key(principal.group_id).await?,
+            RECOVERY_ID,
+        )
+    } else {
+        (
+            state
+                .store
+                .device_key(principal.group_id, principal.device_id)
+                .await?,
+            principal.group_id,
+        )
+    };
+    let key = SignPublicKey::from_bytes(&key.ok_or(ApiError::Unauthorized)?)
+        .map_err(|_| ApiError::Internal)?;
     verify_auth(
         &key,
         &state.config.public_url,
-        &principal.group_id,
+        &signed_group,
         &principal.device_id,
         &pending.nonce,
         request.signature.as_slice(),
@@ -191,7 +261,11 @@ pub async fn session(
         .sessions
         .create_session(principal, now)
         .map_err(|_| ApiError::Internal)?;
-    Ok(Json(Session { token, expires_at }))
+    Ok(Json(Session {
+        token,
+        expires_at,
+        group_id: Bytes::from(principal.group_id),
+    }))
 }
 
 pub async fn commit(
@@ -200,7 +274,7 @@ pub async fn commit(
     Path(group): Path<String>,
     payload: Result<Json<CommitRequest>, JsonRejection>,
 ) -> Result<Json<CommitResponse>, ApiError> {
-    let group_id = auth.group(&group)?;
+    let group_id = auth.device_group(&group)?;
     let request = body(payload)?;
     let limits = &state.config.limits;
     if request.items.is_empty() {
@@ -287,7 +361,7 @@ pub async fn changes(
     Path(group): Path<String>,
     Query(query): Query<ChangesQuery>,
 ) -> Result<Json<Changes>, ApiError> {
-    let group_id = auth.group(&group)?;
+    let group_id = auth.device_group(&group)?;
     let max = state.config.limits.max_page_records;
     let limit = query.limit.unwrap_or(max).clamp(1, max);
     let page = state.store.changes(group_id, query.since, limit).await?;
@@ -334,7 +408,7 @@ pub async fn events(
     auth: Authed,
     Path(group): Path<String>,
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, ApiError> {
-    let group_id = auth.group(&group)?;
+    let group_id = auth.device_group(&group)?;
     // Subscribe before reading, so no advance between the two is missed.
     let updates = state.events.subscribe(group_id);
     let current = state.store.high_seq(group_id).await?;
@@ -345,4 +419,106 @@ pub async fn events(
         Err(_) => None,
     });
     Ok(Sse::new(first.chain(rest)).keep_alive(KeepAlive::new().interval(Duration::from_secs(15))))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct OpsQuery {
+    #[serde(default)]
+    since: u64,
+}
+
+/// The group's chain from `since` (SPEC §6.9).
+pub async fn ops(
+    State(state): State<AppState>,
+    auth: Authed,
+    Path(group): Path<String>,
+    Query(query): Query<OpsQuery>,
+) -> Result<Json<OpsPage>, ApiError> {
+    let group_id = auth.group(&group)?;
+    let (ops, more) = state
+        .store
+        .ops(group_id, query.since, state.config.limits.max_page_records)
+        .await?;
+    Ok(Json(OpsPage {
+        ops: ops
+            .into_iter()
+            .map(|op| SignedOp {
+                index: op.index,
+                op: Bytes(op.op),
+                signatures: op.signatures.into_iter().map(Bytes).collect(),
+            })
+            .collect(),
+        more,
+    }))
+}
+
+/// Append the next operation (SPEC §6.10).
+pub async fn append_op(
+    State(state): State<AppState>,
+    auth: Authed,
+    Path(group): Path<String>,
+    payload: Result<Json<AppendOp>, JsonRejection>,
+) -> Result<Json<Appended>, ApiError> {
+    let group_id = auth.group(&group)?;
+    let request = body(payload)?;
+    // A recovery session exists to add a new device; once that device is
+    // in, it does everything else with its own session.
+    if auth.0.is_recovery()
+        && !Op::decode(request.op.as_slice())
+            .is_ok_and(|op| matches!(op.kind, OpKind::AddDevice(_)))
+    {
+        return Err(ApiError::Forbidden(RECOVERY_ONLY));
+    }
+    let outcome = state
+        .store
+        .append_op(
+            group_id,
+            request.op.0,
+            signatures(&request.signatures)?,
+            wraps(request.wraps)?,
+            state.config.limits.max_devices,
+            now_ms(),
+        )
+        .await?;
+    match &outcome.op.kind {
+        OpKind::RemoveDevice(remove) => {
+            state.sessions.revoke_device(Principal {
+                group_id,
+                device_id: remove.device_id,
+            });
+            // The removed device may be listening. Streams are per group, so
+            // end them all; the remaining devices reconnect.
+            state.events.close_group(group_id);
+        }
+        OpKind::ResetRecovery(_) => state.sessions.revoke_device(Principal {
+            group_id,
+            device_id: RECOVERY_ID,
+        }),
+        // Sessions stay valid until they expire, so connected devices learn
+        // of the deletion: every request now answers 410 group_deleted.
+        OpKind::DeleteGroup(_) => state.events.close_group(group_id),
+        _ => {}
+    }
+    Ok(Json(Appended {
+        head_index: outcome.state.head_index,
+        epoch: outcome.state.epoch,
+    }))
+}
+
+/// The current epoch's wrap for the session's device, or for recovery.
+pub async fn wrap(
+    State(state): State<AppState>,
+    auth: Authed,
+    Path(group): Path<String>,
+) -> Result<Json<CurrentWrap>, ApiError> {
+    let group_id = auth.group(&group)?;
+    let (epoch, ciphertext) = state
+        .store
+        .current_wrap(group_id, auth.0.device_id)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    Ok(Json(CurrentWrap {
+        epoch,
+        ciphertext: Bytes(ciphertext),
+    }))
 }

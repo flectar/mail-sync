@@ -1,7 +1,9 @@
 use crate::{Error, Result, label, random_bytes};
+use chacha20poly1305::aead::{Aead, KeyInit, Payload};
+use chacha20poly1305::{XChaCha20Poly1305, XNonce};
 use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use hkdf::Hkdf;
-use sha2::Sha256;
+use sha2::{Digest, Sha256};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 /// HKDF-SHA256 (RFC 5869) without salt. Every input here is a uniformly
@@ -42,6 +44,76 @@ impl RootKey {
     pub fn tag_key(&self, epoch: u64) -> [u8; 32] {
         hkdf_sha256(&self.0, &[label::TAG_KEY, &epoch.to_be_bytes()])
     }
+
+    /// Public commitment to this key as the root key of `epoch`. Signed
+    /// operations carry it, so a device can check that a key it unwraps is
+    /// the one a member chose and not one the server substituted.
+    pub fn commitment(&self, group_id: &[u8; 16], epoch: u64) -> [u8; 32] {
+        let mut hasher = Sha256::new();
+        hasher.update(label::ROOT_COMMIT);
+        hasher.update(group_id);
+        hasher.update(epoch.to_be_bytes());
+        hasher.update(self.0);
+        hasher.finalize().into()
+    }
+
+    /// Seal `previous` under this key, the root key of `epoch`, for a
+    /// `rotate` operation. Output: nonce (24) || ciphertext (48).
+    pub fn seal_previous(
+        &self,
+        previous: &RootKey,
+        group_id: &[u8; 16],
+        epoch: u64,
+    ) -> Result<Vec<u8>> {
+        let nonce = random_bytes::<24>()?;
+        let mut key = hkdf_sha256(&self.0, &[label::PREVIOUS_ROOT, &epoch.to_be_bytes()]);
+        let sealed = XChaCha20Poly1305::new(&key.into())
+            .encrypt(
+                &XNonce::from(nonce),
+                Payload {
+                    msg: &previous.0,
+                    aad: &previous_root_aad(group_id, epoch),
+                },
+            )
+            .map_err(|_| Error::Decrypt);
+        key.zeroize();
+        let mut out = nonce.to_vec();
+        out.extend_from_slice(&sealed?);
+        Ok(out)
+    }
+
+    /// Open what [`RootKey::seal_previous`] sealed: the root key of
+    /// `epoch - 1`.
+    pub fn open_previous(&self, sealed: &[u8], group_id: &[u8; 16], epoch: u64) -> Result<RootKey> {
+        if sealed.len() != 24 + 32 + 16 {
+            return Err(Error::Malformed("sealed root key has the wrong length"));
+        }
+        let (nonce, ciphertext) = sealed.split_at(24);
+        let nonce: [u8; 24] = nonce.try_into().map_err(|_| Error::Decrypt)?;
+        let mut key = hkdf_sha256(&self.0, &[label::PREVIOUS_ROOT, &epoch.to_be_bytes()]);
+        let opened = XChaCha20Poly1305::new(&key.into())
+            .decrypt(
+                &XNonce::from(nonce),
+                Payload {
+                    msg: ciphertext,
+                    aad: &previous_root_aad(group_id, epoch),
+                },
+            )
+            .map_err(|_| Error::Decrypt);
+        key.zeroize();
+        let mut opened = opened?;
+        let bytes: [u8; 32] = opened.as_slice().try_into().map_err(|_| Error::Decrypt)?;
+        opened.zeroize();
+        Ok(Self(bytes))
+    }
+}
+
+fn previous_root_aad(group_id: &[u8; 16], epoch: u64) -> Vec<u8> {
+    let mut aad = Vec::with_capacity(label::PREVIOUS_ROOT.len() + 24);
+    aad.extend_from_slice(label::PREVIOUS_ROOT);
+    aad.extend_from_slice(group_id);
+    aad.extend_from_slice(&epoch.to_be_bytes());
+    aad
 }
 
 impl std::fmt::Debug for RootKey {
@@ -161,6 +233,42 @@ mod tests {
             key.public_key().verify(b"x", &signature),
             Err(Error::BadSignature)
         );
+    }
+
+    #[test]
+    fn previous_roots_open_only_under_the_newer_key_and_context() {
+        let old = RootKey::from_bytes([1; 32]);
+        let new = RootKey::from_bytes([2; 32]);
+        let sealed = new.seal_previous(&old, &[5; 16], 2).unwrap();
+        assert_eq!(sealed.len(), 72);
+        assert_eq!(
+            new.open_previous(&sealed, &[5; 16], 2).unwrap().as_bytes(),
+            old.as_bytes()
+        );
+        assert_eq!(
+            old.open_previous(&sealed, &[5; 16], 2).unwrap_err(),
+            Error::Decrypt
+        );
+        assert_eq!(
+            new.open_previous(&sealed, &[6; 16], 2).unwrap_err(),
+            Error::Decrypt
+        );
+        assert_eq!(
+            new.open_previous(&sealed, &[5; 16], 3).unwrap_err(),
+            Error::Decrypt
+        );
+    }
+
+    #[test]
+    fn commitments_bind_key_group_and_epoch() {
+        let key = RootKey::from_bytes([1; 32]);
+        let commitment = key.commitment(&[5; 16], 1);
+        assert_ne!(
+            commitment,
+            RootKey::from_bytes([2; 32]).commitment(&[5; 16], 1)
+        );
+        assert_ne!(commitment, key.commitment(&[6; 16], 1));
+        assert_ne!(commitment, key.commitment(&[5; 16], 2));
     }
 
     #[test]

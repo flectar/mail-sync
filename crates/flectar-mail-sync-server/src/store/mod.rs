@@ -5,27 +5,41 @@
 //! connection asynchronously (a semaphore per kind), then run the query on
 //! Tokio's blocking pool. `synchronous=NORMAL` keeps the database consistent
 //! but can lose the newest commits on power loss; the protocol tolerates that
-//! because devices notice a lower `high_seq` and upload again (SPEC §6.4).
+//! because devices notice a lower `high_seq` and upload again (SPEC §8).
 
 use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 use tokio::sync::Semaphore;
 
-const MIGRATIONS: &[&str] = &[include_str!("../migrations/0001_init.sql")];
+mod membership;
+
+pub use membership::{AppendOutcome, NewGroup, StoredOp, WrapIn};
+
+const MIGRATIONS: &[&str] = &[include_str!("../../migrations/0001_init.sql")];
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
     #[error("not found")]
     NotFound,
+    #[error("the group was deleted")]
+    Deleted,
     #[error("the group already exists")]
     GroupExists,
+    #[error("the chain has moved on; read it again")]
+    ChainMoved,
     #[error("the cursor is older than the tombstone horizon")]
     Gone,
     #[error("the group would exceed its storage quota")]
     QuotaExceeded,
+    #[error("the group has reached its device limit")]
+    DeviceLimit,
+    #[error("the recovery key belongs to another group")]
+    RecoveryKeyTaken,
     #[error("{0}")]
     Invalid(&'static str),
+    #[error("invalid operation: {0}")]
+    InvalidOp(String),
     #[error("database error: {0}")]
     Sqlite(#[from] rusqlite::Error),
     #[error("the database task failed: {0}")]
@@ -81,18 +95,6 @@ pub struct ChangesPage {
     pub more: bool,
 }
 
-/// What [`Store::create_group`] stores from a verified genesis operation.
-#[derive(Clone, Debug)]
-pub struct NewGroup {
-    pub group_id: [u8; 16],
-    pub op_hash: [u8; 32],
-    pub op: Vec<u8>,
-    pub signatures: Vec<u8>,
-    pub recovery_sign_public_key: [u8; 32],
-    pub device_id: [u8; 16],
-    pub device_sign_public_key: [u8; 32],
-}
-
 #[derive(Clone, Debug)]
 pub struct Store {
     inner: Arc<Inner>,
@@ -142,11 +144,11 @@ fn migrate(conn: &mut Connection) -> Result<()> {
     Ok(())
 }
 
-fn to_i64(value: u64) -> Result<i64> {
+pub(super) fn to_i64(value: u64) -> Result<i64> {
     i64::try_from(value).map_err(|_| StoreError::Invalid("value out of range"))
 }
 
-fn to_u64(value: i64) -> u64 {
+pub(super) fn to_u64(value: i64) -> u64 {
     // Columns holding these values are CHECKed to be non-negative.
     u64::try_from(value).unwrap_or(0)
 }
@@ -176,7 +178,7 @@ impl Store {
         &self.inner.path
     }
 
-    async fn write<T, F>(&self, job: F) -> Result<T>
+    pub(super) async fn write<T, F>(&self, job: F) -> Result<T>
     where
         T: Send + 'static,
         F: FnOnce(&mut Connection) -> Result<T> + Send + 'static,
@@ -196,7 +198,7 @@ impl Store {
         .map_err(|error| StoreError::Task(error.to_string()))?
     }
 
-    async fn read<T, F>(&self, job: F) -> Result<T>
+    pub(super) async fn read<T, F>(&self, job: F) -> Result<T>
     where
         T: Send + 'static,
         F: FnOnce(&mut Connection) -> Result<T> + Send + 'static,
@@ -236,85 +238,21 @@ impl Store {
         .await
     }
 
-    pub async fn create_group(&self, group: NewGroup, now_ms: i64) -> Result<()> {
-        self.write(move |conn| {
-            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-            let exists = tx
-                .query_row(
-                    "SELECT 1 FROM groups WHERE id = ?1",
-                    [&group.group_id[..]],
-                    |_| Ok(()),
-                )
-                .optional()?
-                .is_some();
-            if exists {
-                return Err(StoreError::GroupExists);
-            }
-            tx.execute(
-                "INSERT INTO groups (id, created_at, epoch, high_seq, recovery_sign_public_key)
-                 VALUES (?1, ?2, 1, 0, ?3)",
-                params![
-                    &group.group_id[..],
-                    now_ms,
-                    &group.recovery_sign_public_key[..]
-                ],
-            )?;
-            tx.execute(
-                "INSERT INTO membership_ops (group_id, idx, hash, op, signatures)
-                 VALUES (?1, 0, ?2, ?3, ?4)",
-                params![
-                    &group.group_id[..],
-                    &group.op_hash[..],
-                    group.op,
-                    group.signatures
-                ],
-            )?;
-            tx.execute(
-                "INSERT INTO devices (group_id, device_id, sign_public_key, added_idx)
-                 VALUES (?1, ?2, ?3, 0)",
-                params![
-                    &group.group_id[..],
-                    &group.device_id[..],
-                    &group.device_sign_public_key[..]
-                ],
-            )?;
-            tx.commit()?;
-            Ok(())
-        })
-        .await
-    }
-
-    /// The signing key of an active device, if the group and device exist.
-    pub async fn device_key(
-        &self,
-        group_id: [u8; 16],
-        device_id: [u8; 16],
-    ) -> Result<Option<[u8; 32]>> {
-        self.read(move |conn| {
-            let key: Option<Vec<u8>> = conn
-                .query_row(
-                    "SELECT sign_public_key FROM devices
-                     WHERE group_id = ?1 AND device_id = ?2 AND removed_idx IS NULL",
-                    params![&group_id[..], &device_id[..]],
-                    |row| row.get(0),
-                )
-                .optional()?;
-            Ok(key.and_then(|key| key.try_into().ok()))
-        })
-        .await
-    }
-
     /// The group's newest sequence number.
     pub async fn high_seq(&self, group_id: [u8; 16]) -> Result<u64> {
         self.read(move |conn| {
-            let seq: Option<i64> = conn
+            let row: Option<(i64, Option<i64>)> = conn
                 .query_row(
-                    "SELECT high_seq FROM groups WHERE id = ?1",
+                    "SELECT high_seq, deleted_at FROM groups WHERE id = ?1",
                     [&group_id[..]],
-                    |row| row.get(0),
+                    |row| Ok((row.get(0)?, row.get(1)?)),
                 )
                 .optional()?;
-            seq.map(to_u64).ok_or(StoreError::NotFound)
+            match row {
+                None => Err(StoreError::NotFound),
+                Some((_, Some(_))) => Err(StoreError::Deleted),
+                Some((seq, None)) => Ok(to_u64(seq)),
+            }
         })
         .await
     }
@@ -331,14 +269,17 @@ impl Store {
     ) -> Result<CommitOutcome> {
         self.write(move |conn| {
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-            let group: Option<(i64, i64, i64)> = tx
+            let group: Option<(i64, i64, i64, Option<i64>)> = tx
                 .query_row(
-                    "SELECT epoch, high_seq, stored_bytes FROM groups WHERE id = ?1",
+                    "SELECT epoch, high_seq, stored_bytes, deleted_at FROM groups WHERE id = ?1",
                     [&group_id[..]],
-                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
                 )
                 .optional()?;
-            let (epoch, high_seq, stored_bytes) = group.ok_or(StoreError::NotFound)?;
+            let (epoch, high_seq, stored_bytes, deleted_at) = group.ok_or(StoreError::NotFound)?;
+            if deleted_at.is_some() {
+                return Err(StoreError::Deleted);
+            }
             let (epoch, mut seq, stored_bytes) =
                 (to_u64(epoch), to_u64(high_seq), to_u64(stored_bytes));
 
@@ -446,14 +387,17 @@ impl Store {
     pub async fn changes(&self, group_id: [u8; 16], since: u64, limit: u32) -> Result<ChangesPage> {
         self.read(move |conn| {
             let tx = conn.transaction()?;
-            let group: Option<(i64, i64)> = tx
+            let group: Option<(i64, i64, Option<i64>)> = tx
                 .query_row(
-                    "SELECT high_seq, horizon_seq FROM groups WHERE id = ?1",
+                    "SELECT high_seq, horizon_seq, deleted_at FROM groups WHERE id = ?1",
                     [&group_id[..]],
-                    |row| Ok((row.get(0)?, row.get(1)?)),
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
                 )
                 .optional()?;
-            let (high_seq, horizon) = group.ok_or(StoreError::NotFound)?;
+            let (high_seq, horizon, deleted_at) = group.ok_or(StoreError::NotFound)?;
+            if deleted_at.is_some() {
+                return Err(StoreError::Deleted);
+            }
             let (high_seq, horizon) = (to_u64(high_seq), to_u64(horizon));
             if since != 0 && since < horizon {
                 return Err(StoreError::Gone);
@@ -549,15 +493,39 @@ mod tests {
         (dir, store)
     }
 
-    fn group(id: u8) -> NewGroup {
-        NewGroup {
+    /// A signed genesis for group `[id; 16]` with an epoch 1 recovery wrap.
+    pub(crate) fn group(id: u8) -> NewGroup {
+        use flectar_mail_sync_crypto::{
+            DeviceKeys, DeviceSigningKey, Genesis, Op, OpKind, RECOVERY_ID, RecoveryCode, RootKey,
+            sign_op,
+        };
+        let recovery = RecoveryCode::from_bytes([id; 32]).signing_key();
+        let device = DeviceSigningKey::from_seed(&[id.wrapping_add(1); 32]);
+        let op = Op {
             group_id: [id; 16],
-            op_hash: [0; 32],
-            op: vec![1],
-            signatures: vec![0; 128],
-            recovery_sign_public_key: [3; 32],
-            device_id: [4; 16],
-            device_sign_public_key: [5; 32],
+            index: 0,
+            prev_hash: [0; 32],
+            created_at_ms: 0,
+            kind: OpKind::Genesis(Genesis {
+                recovery_sign_public_key: recovery.public_key().to_bytes(),
+                recovery_kem_public_key: vec![1; 32],
+                device: DeviceKeys {
+                    device_id: [4; 16],
+                    sign_public_key: device.public_key().to_bytes(),
+                    kem_public_key: vec![2; 32],
+                },
+                root_commitment: RootKey::from_bytes([9; 32]).commitment(&[id; 16], 1),
+            }),
+        }
+        .encode()
+        .unwrap();
+        NewGroup {
+            signatures: vec![sign_op(&recovery, &op), sign_op(&device, &op)],
+            op,
+            wraps: vec![WrapIn {
+                target: RECOVERY_ID,
+                ciphertext: vec![7; 100],
+            }],
         }
     }
 
@@ -693,6 +661,63 @@ mod tests {
             store.create_group(group(1), 0).await,
             Err(StoreError::GroupExists)
         ));
+    }
+
+    #[tokio::test]
+    async fn deleting_a_group_keeps_only_its_marker() {
+        use flectar_mail_sync_crypto::{
+            Authorizer, DeleteGroup, DeviceSigningKey, Op, OpKind, sign_op,
+        };
+        let (_dir, store) = store();
+        let state = store.create_group(group(1), 0).await.unwrap();
+        store
+            .commit([1; 16], vec![put(1, 0, 10)], 1 << 20, 1)
+            .await
+            .unwrap();
+        let op = Op {
+            group_id: [1; 16],
+            index: 1,
+            prev_hash: state.head_hash,
+            created_at_ms: 0,
+            kind: OpKind::DeleteGroup(DeleteGroup {
+                authorizer: Authorizer::Device([4; 16]),
+            }),
+        }
+        .encode()
+        .unwrap();
+        // The device key `group(1)` puts in its genesis.
+        let device = DeviceSigningKey::from_seed(&[2; 32]);
+        store
+            .append_op(
+                [1; 16],
+                op.clone(),
+                vec![sign_op(&device, &op)],
+                vec![],
+                25,
+                2,
+            )
+            .await
+            .unwrap();
+
+        let conn = Connection::open(store.path()).unwrap();
+        for table in ["records", "wraps", "devices", "membership_ops"] {
+            let rows: i64 = conn
+                .query_row(
+                    &format!("SELECT count(*) FROM {table} WHERE group_id = ?1"),
+                    [&[1u8; 16][..]],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(rows, 0, "{table} still holds rows of the group");
+        }
+        let marker: (Option<i64>, Option<Vec<u8>>, i64) = conn
+            .query_row(
+                "SELECT deleted_at, recovery_sign_public_key, stored_bytes FROM groups WHERE id = ?1",
+                [&[1u8; 16][..]],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(marker, (Some(2), None, 0));
     }
 
     #[tokio::test]

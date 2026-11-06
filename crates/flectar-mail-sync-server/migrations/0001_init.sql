@@ -12,10 +12,19 @@ CREATE TABLE groups (
   horizon_seq INTEGER NOT NULL DEFAULT 0 CHECK (horizon_seq >= 0),
   -- Sum of the stored sizes of the group's records, for the quota.
   stored_bytes INTEGER NOT NULL DEFAULT 0 CHECK (stored_bytes >= 0),
-  recovery_sign_public_key BLOB NOT NULL CHECK (length(recovery_sign_public_key) = 32)
+  -- Current recovery signing key. A recovery login finds its group by this
+  -- key, so each key belongs to one group at most. The chain in
+  -- membership_ops is authoritative; this copies its latest value. NULL once
+  -- the group is deleted.
+  recovery_sign_public_key BLOB UNIQUE CHECK (length(recovery_sign_public_key) = 32),
+  -- Set when a delete_group operation emptied the group. The row stays so
+  -- the id is never reused and devices learn the group was deleted.
+  deleted_at INTEGER,
+  CHECK ((deleted_at IS NULL) = (recovery_sign_public_key IS NOT NULL))
 ) STRICT, WITHOUT ROWID;
 
--- The signed, hash-chained membership log. Index 0 is the genesis.
+-- The signed, hash-chained membership log. Index 0 is the genesis. The
+-- server replays it through the same state machine devices use.
 CREATE TABLE membership_ops (
   group_id BLOB NOT NULL REFERENCES groups (id) ON DELETE CASCADE,
   idx INTEGER NOT NULL CHECK (idx >= 0),
@@ -26,13 +35,12 @@ CREATE TABLE membership_ops (
   PRIMARY KEY (group_id, idx)
 ) STRICT, WITHOUT ROWID;
 
+-- Active devices and their signing keys, for logins: a cache of the
+-- chain's latest state. Removed devices are deleted from this table.
 CREATE TABLE devices (
   group_id BLOB NOT NULL REFERENCES groups (id) ON DELETE CASCADE,
   device_id BLOB NOT NULL CHECK (length(device_id) = 16),
   sign_public_key BLOB NOT NULL CHECK (length(sign_public_key) = 32),
-  -- Membership ops that added and removed the device.
-  added_idx INTEGER NOT NULL,
-  removed_idx INTEGER,
   PRIMARY KEY (group_id, device_id)
 ) STRICT, WITHOUT ROWID;
 
@@ -54,6 +62,17 @@ CREATE TABLE records (
   CHECK ((deleted = 1) = (tag IS NULL)),
   CHECK ((deleted = 1) = (nonce IS NULL)),
   CHECK ((deleted = 1) = (epoch IS NULL))
+) STRICT, WITHOUT ROWID;
+
+-- Root keys wrapped for devices and the recovery key (target all zeros).
+-- Only the current epoch's wraps are kept: older root keys travel sealed in
+-- the chain's rotate operations.
+CREATE TABLE wraps (
+  group_id BLOB NOT NULL REFERENCES groups (id) ON DELETE CASCADE,
+  epoch INTEGER NOT NULL CHECK (epoch >= 1),
+  target BLOB NOT NULL CHECK (length(target) = 16),
+  ciphertext BLOB NOT NULL,
+  PRIMARY KEY (group_id, epoch, target)
 ) STRICT, WITHOUT ROWID;
 
 CREATE INDEX records_by_seq ON records (group_id, seq);

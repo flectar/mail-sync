@@ -50,6 +50,14 @@ impl Events {
             .retain(|_, sender| sender.receiver_count() > 0);
     }
 
+    /// End the event streams of one group, e.g. after it is deleted.
+    pub fn close_group(&self, group_id: [u8; 16]) {
+        self.channels
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&group_id);
+    }
+
     /// End every event stream, so a graceful shutdown does not wait for
     /// listeners that never disconnect on their own.
     pub fn close_all(&self) {

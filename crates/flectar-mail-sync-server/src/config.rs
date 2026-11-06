@@ -24,6 +24,7 @@ impl Config {
                 max_request_bytes: 8 * 1024 * 1024,
                 max_group_bytes: 64 * 1024 * 1024,
                 max_page_records: 1000,
+                max_devices: 25,
             },
             challenge_ttl: Duration::from_secs(120),
             session_ttl: Duration::from_secs(3600),
