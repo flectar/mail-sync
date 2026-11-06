@@ -412,3 +412,51 @@ async fn a_lost_answer_does_not_strand_a_joining_device() {
     phone.sync().await;
     assert_eq!(phone.client.state().await.devices.len(), 2);
 }
+
+/// A small deterministic generator, so failures replay.
+struct Xorshift(u64);
+
+impl Xorshift {
+    fn next(&mut self, below: u64) -> u64 {
+        self.0 ^= self.0 << 13;
+        self.0 ^= self.0 >> 7;
+        self.0 ^= self.0 << 17;
+        self.0 % below
+    }
+}
+
+#[tokio::test]
+async fn random_edits_on_three_devices_converge() {
+    for seed in [1, 7, 42, 1234, 99_991] {
+        let server = Server::start().await;
+        let (laptop, _) = start_group(&server).await;
+        let phone = join_by_qr(&laptop).await;
+        let desktop = join_by_qr(&laptop).await;
+        let mut devices = [laptop, phone, desktop];
+        let mut random = Xorshift(seed);
+        for step in 0..150 {
+            let device = &mut devices[random.next(3) as usize];
+            let record = random.next(6) as u8;
+            match random.next(10) {
+                0..=4 => device.set(record, &format!("{seed}-{step}")),
+                5..=6 => device.remove(record),
+                _ => {
+                    device.sync().await;
+                }
+            }
+        }
+        // Everyone syncs twice: the first round uploads, the second reads.
+        for _ in 0..2 {
+            for device in &mut devices {
+                device.sync().await;
+            }
+        }
+        let [first, rest @ ..] = &devices;
+        for device in rest {
+            assert_eq!(device.store.entries, first.store.entries, "seed {seed}");
+        }
+        for device in &devices {
+            assert!(device.store.outbox.is_empty(), "seed {seed}");
+        }
+    }
+}

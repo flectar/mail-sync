@@ -58,6 +58,11 @@ pub struct Mirrored {
 }
 
 /// A local change waiting to be uploaded.
+///
+/// Record ids are random per item. Collections keyed by name, such as
+/// preferences, write a default value instead of deleting, since a deleted
+/// record's id should not come back: a device with a slow clock could
+/// stamp it older than the deletion others remember.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Pending {
     pub record_id: [u8; 16],
@@ -92,6 +97,11 @@ pub trait Store: Send {
     /// the mirror, merge the change into the app's state, and rebase any
     /// pending change of the record on it (`base_seq` = the change's
     /// `seq`), or drop the pending change if the merge made it moot.
+    ///
+    /// A pending change that survives a merge must have a newer stamp than
+    /// the change it was merged with: keep its own if it is newer, or stamp
+    /// the merged result with [`crate::Clock::now`]. Readers refuse
+    /// versions older than ones they saw, as rollbacks.
     fn apply(&mut self, changes: &[Remote], cursor: u64) -> std::result::Result<(), StoreError>;
 
     /// Pending local changes, oldest first, at most `limit`.
